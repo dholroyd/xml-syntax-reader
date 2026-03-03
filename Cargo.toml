@@ -1,0 +1,14 @@
+[package]
+name = "xml-syntax-reader"
+version = "0.1.0"
+edition = "2024"
+description = "Low-level, callback-based, streaming XML tokenizer"
+license = "MIT/Apache-2.0"
+repository = "https://github.com/dholroyd/xml-syntax-reader"
+
+[features]
+default = ["std"]
+std = ["memchr/std"]
+
+[dependencies]
+memchr = { version = "2", default-features = false }
