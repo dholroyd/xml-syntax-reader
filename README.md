@@ -79,6 +79,37 @@ fn count_elements(mut input: impl Read) -> std::io::Result<u64> {
 }
 ```
 
+### Buffer size requirements
+
+Because visitor callbacks receive `&[u8]` slices that are zero-copy references
+into the caller's buffer, the parser cannot emit a callback for a construct
+until all of its bytes are contiguous in the buffer. Certain constructs -
+element names, attribute names, end tags, entity references, PI targets,
+DOCTYPE names, and the XML declaration - are **atomic**: the parser holds
+unconsumed bytes from the opening delimiter (e.g. `<`, `&`) until the closing
+delimiter is found. During this window `parse()` cannot advance past the
+opening delimiter, so those bytes accumulate in the buffer.
+
+The largest atomic construct is a DOCTYPE declaration with a maximum-length
+name: `<!DOCTYPE` (9 bytes) + whitespace (1) + name (up to 1,000 bytes) +
+delimiter (1) = **1,011 bytes**. If the buffer is too small to hold the
+complete atomic construct, `parse()` will return `consumed == 0` on each call,
+the buffer will fill with unconsumed bytes, and no further progress can be
+made. When `is_final` is then set to `true`, this produces an `UnexpectedEof`
+error.
+
+**Minimum buffer size: 4 KiB (4,096 bytes).** - This is roughly 4× the
+theoretical minimum and provides comfortable headroom. A fixed-size buffer is
+sufficient - there is no need to grow it dynamically, because the 1,000-byte
+name length limit bounds the worst case.
+
+**Recommended default: 8 KiB (8,192 bytes)** - this is what `parse_read` uses
+internally.
+
+The built-in `parse_read_with_capacity` clamps its capacity to a minimum of 64
+bytes (one SIMD block), but callers writing their own streaming loop should use
+at least 4 KiB to avoid stalling on legal XML with long names.
+
 ## Events
 
 The `Visitor` trait provides callbacks for all XML syntax constructs:
@@ -152,7 +183,10 @@ let mut visitor = MyVisitor;
 parse_read(file, &mut visitor).unwrap();
 ```
 
-`parse_read_with_capacity` allows specifying the buffer size (minimum 64 bytes).
+`parse_read_with_capacity` allows specifying the buffer size. The capacity is
+clamped to a minimum of 64 bytes, but at least **4 KiB** is recommended to
+avoid stalling on legal XML with long names (see
+[Buffer size requirements](#buffer-size-requirements)).
 
 ## Encoding Detection
 
