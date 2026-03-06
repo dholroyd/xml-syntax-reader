@@ -79,7 +79,7 @@ mod encoding;
 
 mod bitstream;
 
-pub use types::{DeclaredEncoding, Encoding, Error, ErrorKind, ParseError, Span};
+pub use types::{DeclaredEncoding, Encoding, EntityKind, Error, ErrorKind, ParseError, Span};
 pub use visitor::Visitor;
 pub use reader::Reader;
 #[cfg(feature = "std")]

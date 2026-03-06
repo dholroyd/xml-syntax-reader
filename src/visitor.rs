@@ -1,4 +1,4 @@
-use crate::types::Span;
+use crate::types::{EntityKind, Span};
 
 /// Trait for receiving fine-grained XML parsing events.
 ///
@@ -405,6 +405,275 @@ pub trait Visitor {
     /// End of a DOCTYPE declaration: `>`.
     fn doctype_end(&mut self, span: Span) -> Result<(), Self::Error> {
         let _ = span;
+        Ok(())
+    }
+
+    // --- DTD Internal Subset Events ---
+    //
+    // These methods are always present on the trait (with default no-op impls)
+    // regardless of feature flags. The `dtd` feature controls whether the
+    // *parser* tokenizes the internal subset or treats it as opaque bytes.
+    //
+    // # Callback sequences (when `dtd` feature is enabled)
+    //
+    // ## DOCTYPE with external ID and internal subset
+    //
+    // ```text
+    // doctype_start("html")
+    //   doctype_system_id("foo.dtd")
+    //   doctype_internal_subset_start
+    //     element_decl_start("p") element_decl_content_spec("(#PCDATA)") element_decl_end
+    //     entity_decl_start("amp", false)
+    //       entity_decl_char_ref("38") entity_decl_value_end
+    //     entity_decl_end
+    //   doctype_internal_subset_end
+    // doctype_end
+    // ```
+    //
+    // Comments and PIs inside the internal subset reuse the existing
+    // `comment_*` and `pi_*` callbacks.
+
+    /// System identifier literal from DOCTYPE external ID.
+    /// `literal` is the content between quotes (quotes not included).
+    /// For `PUBLIC`, this is the second literal.
+    fn doctype_system_id(&mut self, literal: &[u8], span: Span) -> Result<(), Self::Error> {
+        let _ = (literal, span);
+        Ok(())
+    }
+
+    /// Public identifier literal from DOCTYPE external ID.
+    /// `literal` is the content between quotes (quotes not included).
+    /// For `PUBLIC`, this is the first literal; `doctype_system_id` follows.
+    fn doctype_public_id(&mut self, literal: &[u8], span: Span) -> Result<(), Self::Error> {
+        let _ = (literal, span);
+        Ok(())
+    }
+
+    /// Start of the internal subset: `[`.
+    fn doctype_internal_subset_start(&mut self, span: Span) -> Result<(), Self::Error> {
+        let _ = span;
+        Ok(())
+    }
+
+    /// End of the internal subset: `]`.
+    fn doctype_internal_subset_end(&mut self, span: Span) -> Result<(), Self::Error> {
+        let _ = span;
+        Ok(())
+    }
+
+    // --- ELEMENT declaration ---
+
+    /// Start of `<!ELEMENT name ...>`. `name` is the element name.
+    fn element_decl_start(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
+        let _ = (name, span);
+        Ok(())
+    }
+
+    /// Content spec keyword `EMPTY`.
+    fn element_decl_empty(&mut self, span: Span) -> Result<(), Self::Error> {
+        let _ = span;
+        Ok(())
+    }
+
+    /// Content spec keyword `ANY`.
+    fn element_decl_any(&mut self, span: Span) -> Result<(), Self::Error> {
+        let _ = span;
+        Ok(())
+    }
+
+    /// Content spec raw bytes (parenthesized content model).
+    /// May be called multiple times if the model spans buffer boundaries.
+    /// Includes the parentheses and any trailing `?`, `*`, `+`.
+    fn element_decl_content_spec(&mut self, content: &[u8], span: Span) -> Result<(), Self::Error> {
+        let _ = (content, span);
+        Ok(())
+    }
+
+    /// End of `<!ELEMENT>`: the closing `>`.
+    fn element_decl_end(&mut self, span: Span) -> Result<(), Self::Error> {
+        let _ = span;
+        Ok(())
+    }
+
+    // --- ATTLIST declaration ---
+
+    /// Start of `<!ATTLIST name ...>`. `name` is the element name.
+    fn attlist_decl_start(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
+        let _ = (name, span);
+        Ok(())
+    }
+
+    /// Attribute name within an ATTLIST declaration.
+    fn attlist_attr_name(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
+        let _ = (name, span);
+        Ok(())
+    }
+
+    /// Attribute type (raw bytes).
+    /// For keyword types: `"CDATA"`, `"ID"`, `"IDREF"`, etc.
+    /// For enumerations: `"(a|b|c)"` or `"NOTATION (x|y)"`.
+    /// May be called multiple times if the type spans buffer boundaries.
+    fn attlist_attr_type(&mut self, content: &[u8], span: Span) -> Result<(), Self::Error> {
+        let _ = (content, span);
+        Ok(())
+    }
+
+    /// Default declaration: `#REQUIRED`.
+    fn attlist_attr_required(&mut self, span: Span) -> Result<(), Self::Error> {
+        let _ = span;
+        Ok(())
+    }
+
+    /// Default declaration: `#IMPLIED`.
+    fn attlist_attr_implied(&mut self, span: Span) -> Result<(), Self::Error> {
+        let _ = span;
+        Ok(())
+    }
+
+    /// Start of a default attribute value.
+    /// `fixed` is `true` if `#FIXED` preceded the value.
+    fn attlist_attr_default_start(&mut self, fixed: bool, span: Span) -> Result<(), Self::Error> {
+        let _ = (fixed, span);
+        Ok(())
+    }
+
+    /// Text segment of a default attribute value.
+    fn attlist_attr_default_value(&mut self, value: &[u8], span: Span) -> Result<(), Self::Error> {
+        let _ = (value, span);
+        Ok(())
+    }
+
+    /// Entity reference `&name;` in a default attribute value.
+    fn attlist_attr_default_entity_ref(
+        &mut self,
+        name: &[u8],
+        span: Span,
+    ) -> Result<(), Self::Error> {
+        let _ = (name, span);
+        Ok(())
+    }
+
+    /// Character reference `&#NNN;` or `&#xHHH;` in a default attribute value.
+    fn attlist_attr_default_char_ref(
+        &mut self,
+        value: &[u8],
+        span: Span,
+    ) -> Result<(), Self::Error> {
+        let _ = (value, span);
+        Ok(())
+    }
+
+    /// End of a default attribute value (closing quote consumed).
+    fn attlist_attr_default_end(&mut self, span: Span) -> Result<(), Self::Error> {
+        let _ = span;
+        Ok(())
+    }
+
+    /// End of `<!ATTLIST>`: the closing `>`.
+    fn attlist_decl_end(&mut self, span: Span) -> Result<(), Self::Error> {
+        let _ = span;
+        Ok(())
+    }
+
+    // --- ENTITY declaration ---
+
+    /// Start of `<!ENTITY name ...>` or `<!ENTITY % name ...>`.
+    fn entity_decl_start(
+        &mut self,
+        name: &[u8],
+        kind: EntityKind,
+        span: Span,
+    ) -> Result<(), Self::Error> {
+        let _ = (name, kind, span);
+        Ok(())
+    }
+
+    /// Text segment of an entity value.
+    fn entity_decl_value(&mut self, value: &[u8], span: Span) -> Result<(), Self::Error> {
+        let _ = (value, span);
+        Ok(())
+    }
+
+    /// Entity reference `&name;` in an entity value.
+    fn entity_decl_entity_ref(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
+        let _ = (name, span);
+        Ok(())
+    }
+
+    /// Character reference `&#NNN;` or `&#xHHH;` in an entity value.
+    fn entity_decl_char_ref(&mut self, value: &[u8], span: Span) -> Result<(), Self::Error> {
+        let _ = (value, span);
+        Ok(())
+    }
+
+    /// Parameter entity reference `%name;` in an entity value.
+    fn entity_decl_pe_ref(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
+        let _ = (name, span);
+        Ok(())
+    }
+
+    /// End of an entity value (closing quote consumed).
+    fn entity_decl_value_end(&mut self, span: Span) -> Result<(), Self::Error> {
+        let _ = span;
+        Ok(())
+    }
+
+    /// NDATA declaration in a general entity: `NDATA name`.
+    fn entity_decl_ndata(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
+        let _ = (name, span);
+        Ok(())
+    }
+
+    /// System identifier in an entity's external ID.
+    fn entity_decl_system_id(&mut self, literal: &[u8], span: Span) -> Result<(), Self::Error> {
+        let _ = (literal, span);
+        Ok(())
+    }
+
+    /// Public identifier in an entity's external ID.
+    fn entity_decl_public_id(&mut self, literal: &[u8], span: Span) -> Result<(), Self::Error> {
+        let _ = (literal, span);
+        Ok(())
+    }
+
+    /// End of `<!ENTITY>`: the closing `>`.
+    fn entity_decl_end(&mut self, span: Span) -> Result<(), Self::Error> {
+        let _ = span;
+        Ok(())
+    }
+
+    // --- NOTATION declaration ---
+
+    /// Start of `<!NOTATION name ...>`. `name` is the notation name.
+    fn notation_decl_start(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
+        let _ = (name, span);
+        Ok(())
+    }
+
+    /// System identifier in a notation declaration.
+    fn notation_decl_system_id(&mut self, literal: &[u8], span: Span) -> Result<(), Self::Error> {
+        let _ = (literal, span);
+        Ok(())
+    }
+
+    /// Public identifier in a notation declaration.
+    fn notation_decl_public_id(&mut self, literal: &[u8], span: Span) -> Result<(), Self::Error> {
+        let _ = (literal, span);
+        Ok(())
+    }
+
+    /// End of `<!NOTATION>`: the closing `>`.
+    fn notation_decl_end(&mut self, span: Span) -> Result<(), Self::Error> {
+        let _ = span;
+        Ok(())
+    }
+
+    // --- Parameter entity reference in internal subset ---
+
+    /// Parameter entity reference at the top level of the internal subset: `%name;`.
+    /// `name` is the entity name without `%` and `;`.
+    fn dtd_pe_reference(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
+        let _ = (name, span);
         Ok(())
     }
 }

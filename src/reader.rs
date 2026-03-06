@@ -1,7 +1,9 @@
 use crate::bitstream::{self, TransposeFn};
 use crate::classify::{self, CharClassMasks};
 use crate::state::{DoctypeSubState, ParserState, QuoteStyle};
-use crate::types::{is_xml_whitespace, Error, ErrorKind, ParseError, Span};
+#[cfg(feature = "dtd")]
+use crate::state::{DtdDeclContext, DtdDeclKind, DtdPhase};
+use crate::types::{is_xml_whitespace, EntityKind, Error, ErrorKind, ParseError, Span};
 use crate::visitor::Visitor;
 
 /// Maximum allowed length (in bytes) for XML names: element names, attribute
@@ -60,6 +62,10 @@ pub struct Reader {
 
     /// Absolute stream offset of the `<?` that started the XML declaration.
     xml_decl_span_start: u64,
+
+    /// DTD internal subset tokenizer phase.
+    #[cfg(feature = "dtd")]
+    dtd_phase: DtdPhase,
 }
 
 impl Reader {
@@ -78,6 +84,8 @@ impl Reader {
             xml_decl_buf: [0; 256],
             xml_decl_buf_len: 0,
             xml_decl_span_start: 0,
+            #[cfg(feature = "dtd")]
+            dtd_phase: DtdPhase::Idle,
         }
     }
 
@@ -89,6 +97,8 @@ impl Reader {
         self.had_markup = false;
         self.in_xml_decl = false;
         self.xml_decl_buf_len = 0;
+        #[cfg(feature = "dtd")]
+        { self.dtd_phase = DtdPhase::Idle; }
     }
 
     /// Transition back to Content state after completing a markup token.
@@ -548,6 +558,12 @@ impl Reader {
                 ParserState::CommentContent { dash_count } => *dash_count as usize,
                 ParserState::CdataContent { bracket_count } => *bracket_count as usize,
                 ParserState::PIContent { saw_qmark: true } => 1,
+                #[cfg(feature = "dtd")]
+                ParserState::DtdInternalSubset => match &self.dtd_phase {
+                    DtdPhase::Comment { dash_count } => *dash_count as usize,
+                    DtdPhase::PIContent { saw_qmark: true } => 1,
+                    _ => 0,
+                },
                 _ => 0,
             };
             if exclude > 0 {
@@ -557,6 +573,12 @@ impl Reader {
                     ParserState::CommentContent { dash_count } => *dash_count = 0,
                     ParserState::CdataContent { bracket_count } => *bracket_count = 0,
                     ParserState::PIContent { saw_qmark } => *saw_qmark = false,
+                    #[cfg(feature = "dtd")]
+                    ParserState::DtdInternalSubset => match &mut self.dtd_phase {
+                        DtdPhase::Comment { dash_count } => *dash_count = 0,
+                        DtdPhase::PIContent { saw_qmark } => *saw_qmark = false,
+                        _ => {}
+                    },
                     _ => {}
                 }
                 // Force resume_pos to rescan excluded bytes
@@ -610,6 +632,10 @@ impl Reader {
                         ParserState::AttrValue { .. } => {
                             visitor.attribute_value(content, span).map_err(ParseError::Visitor)?;
                         }
+                        #[cfg(feature = "dtd")]
+                        ParserState::DtdInternalSubset => {
+                            self.flush_dtd_content(content, span, visitor)?;
+                        }
                         _ => {}
                     }
                 }
@@ -623,6 +649,8 @@ impl Reader {
             self.markup_start = self.markup_start.map(|s| s - consumed);
             self.resume_pos = self.resume_pos.saturating_sub(consumed);
             self.state.adjust_positions(consumed);
+            #[cfg(feature = "dtd")]
+            self.dtd_phase.adjust_positions(consumed);
         }
 
         Ok(consumed as u64)
@@ -1150,6 +1178,22 @@ impl Reader {
                         stream_offset, value_start, quote, visitor,
                     )?;
                 }
+
+                #[cfg(feature = "dtd")]
+                ParserState::DtdInternalSubset => {
+                    pos = self.scan_dtd_internal_subset(
+                        buf, block_offset, block_len, pos,
+                        stream_offset, visitor,
+                    )?;
+                }
+
+                #[cfg(feature = "dtd")]
+                ParserState::DoctypeAfterSubset => {
+                    pos = self.scan_doctype_after_subset(
+                        buf, block_offset, block_len, pos,
+                        stream_offset, visitor,
+                    )?;
+                }
             }
         }
 
@@ -1663,17 +1707,45 @@ impl Reader {
 
             match sub {
                 DoctypeSubState::Normal => match byte {
+                    #[cfg(feature = "dtd")]
+                    b'[' if depth == 0 => {
+                        // Enter DTD internal subset tokenizer
+                        if abs > content_start {
+                            let span = Span::new(
+                                stream_offset + content_start as u64,
+                                stream_offset + abs as u64,
+                            );
+                            visitor
+                                .doctype_content(&buf[content_start..abs], span)
+                                .map_err(ParseError::Visitor)?;
+                        }
+                        let bracket_span = Span::new(
+                            stream_offset + abs as u64,
+                            stream_offset + abs as u64 + 1,
+                        );
+                        visitor
+                            .doctype_internal_subset_start(bracket_span)
+                            .map_err(ParseError::Visitor)?;
+                        self.content_start = None;
+                        self.dtd_phase = DtdPhase::Idle;
+                        self.state = ParserState::DtdInternalSubset;
+                        return Ok(pos + 1);
+                    }
                     b'[' => {
-                        depth += 1;
-                        if depth > 1024 {
+                        if depth > 0 {
+                            // `[` inside the internal subset (at top level) is not
+                            // valid well-formed XML.  Conditional sections
+                            // (`<![INCLUDE[…]]>`) appear only in external DTD
+                            // subsets, never in internal subsets.
                             return Err(ParseError::Xml(Error {
-                                kind: ErrorKind::DoctypeBracketsTooDeep,
+                                kind: ErrorKind::UnexpectedByte(b'['),
                                 offset: stream_offset + abs as u64,
                             }));
                         }
+                        depth = 1;
                     }
-                    b']' => {
-                        depth = depth.saturating_sub(1);
+                    b']' if depth > 0 => {
+                        depth = 0;
                     }
                     b'>' => {
                         if depth == 0 {
@@ -2109,6 +2181,1380 @@ impl Reader {
         self.state = ParserState::AttrValue { quote };
         Ok(next_pos)
     }
+
+    // ======================================================================
+    // DTD Internal Subset Tokenizer (feature = "dtd")
+    // ======================================================================
+
+    /// Maximum length for system/public identifier literals.
+    #[cfg(feature = "dtd")]
+    const MAX_LITERAL_LENGTH: usize = 8_192;
+
+    /// Maximum parenthesis nesting depth in content models and enumerated types.
+    #[cfg(feature = "dtd")]
+    const MAX_PAREN_DEPTH: u32 = 256;
+
+    /// Scan the DTD internal subset. Dispatches on `self.dtd_phase`.
+    #[cfg(feature = "dtd")]
+    fn scan_dtd_internal_subset<V: Visitor>(
+        &mut self,
+        buf: &[u8],
+        block_offset: usize,
+        block_len: usize,
+        mut pos: usize,
+        stream_offset: u64,
+        visitor: &mut V,
+    ) -> Result<usize, ParseError<V::Error>> {
+        while pos < block_len {
+            let abs = block_offset + pos;
+            let byte = buf[abs];
+
+            match self.dtd_phase {
+                DtdPhase::Idle => match byte {
+                    b']' => {
+                        let span = Span::new(
+                            stream_offset + abs as u64,
+                            stream_offset + abs as u64 + 1,
+                        );
+                        visitor
+                            .doctype_internal_subset_end(span)
+                            .map_err(ParseError::Visitor)?;
+                        self.state = ParserState::DoctypeAfterSubset;
+                        return Ok(pos + 1);
+                    }
+                    b'<' => {
+                        self.markup_start = Some(abs);
+                        self.dtd_phase = DtdPhase::AfterLt;
+                    }
+                    b'%' => {
+                        self.markup_start = Some(abs);
+                        self.dtd_phase = DtdPhase::PeRefName { name_start: abs + 1 };
+                    }
+                    b if is_xml_whitespace(b) => { /* skip */ }
+                    _ => {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::UnexpectedByte(byte),
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                },
+
+                DtdPhase::AfterLt => match byte {
+                    b'!' => self.dtd_phase = DtdPhase::AfterLtBang,
+                    b'?' => {
+                        // markup_start already set in Idle when we saw '<'
+                        self.dtd_phase = DtdPhase::PITarget { name_start: abs + 1 };
+                    }
+                    _ => {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::UnexpectedByte(byte),
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                },
+
+                DtdPhase::AfterLtBang => {
+                    let lt_offset = self.markup_start.map(|s| stream_offset + s as u64)
+                        .unwrap_or(stream_offset + abs as u64);
+                    match byte {
+                    b'-' => self.dtd_phase = DtdPhase::AfterLtBangDash,
+                    b'E' => {
+                        // Could be ELEMENT or ENTITY
+                        // markup_start already set in Idle when we saw '<'
+                        self.dtd_phase = DtdPhase::MatchKeyword {
+                            kind: DtdDeclKind::Element, // tentative, refined at byte 2
+                            matched: 1, // 'E' matched
+                        };
+                    }
+                    b'A' => {
+                        // markup_start already set in Idle
+                        self.dtd_phase = DtdPhase::MatchKeyword {
+                            kind: DtdDeclKind::Attlist,
+                            matched: 1,
+                        };
+                    }
+                    b'N' => {
+                        // markup_start already set in Idle
+                        self.dtd_phase = DtdPhase::MatchKeyword {
+                            kind: DtdDeclKind::Notation,
+                            matched: 1,
+                        };
+                    }
+                    b'[' => {
+                        // Conditional section — opaque scan (not yet supported, error for now)
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::DtdInvalidMarkup,
+                            offset: lt_offset,
+                        }));
+                    }
+                    _ => {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::DtdInvalidMarkup,
+                            offset: lt_offset,
+                        }));
+                    }
+                    }
+                },
+
+                DtdPhase::AfterLtBangDash => {
+                    let lt_offset = self.markup_start.map(|s| stream_offset + s as u64)
+                        .unwrap_or(stream_offset + abs as u64);
+                    match byte {
+                        b'-' => {
+                            // Enter comment — clear markup_start so content body
+                            // streaming works correctly at buffer boundaries.
+                            let span = Span::new(
+                                lt_offset,
+                                stream_offset + abs as u64 + 1,
+                            );
+                            visitor.comment_start(span).map_err(ParseError::Visitor)?;
+                            self.markup_stream_offset = Some(lt_offset);
+                            self.markup_start = None;
+                            self.content_start = Some(abs + 1);
+                            self.dtd_phase = DtdPhase::Comment { dash_count: 0 };
+                        }
+                        _ => {
+                            return Err(ParseError::Xml(Error {
+                                kind: ErrorKind::DtdInvalidMarkup,
+                                offset: lt_offset,
+                            }));
+                        }
+                    }
+                }
+
+                DtdPhase::Comment { ref mut dash_count } => match byte {
+                    b'-' => *dash_count = dash_count.saturating_add(1),
+                    b'>' if *dash_count >= 2 => {
+                        // End of comment
+                        let content_start = self.content_start.unwrap();
+                        let content_end = abs - 2; // exclude "-->"
+                        if content_end > content_start {
+                            let span = Span::new(
+                                stream_offset + content_start as u64,
+                                stream_offset + content_end as u64,
+                            );
+                            visitor.comment_content(&buf[content_start..content_end], span)
+                                .map_err(ParseError::Visitor)?;
+                        }
+                        let end_span = Span::new(
+                            stream_offset + (abs - 2) as u64,
+                            stream_offset + abs as u64 + 1,
+                        );
+                        visitor.comment_end(end_span).map_err(ParseError::Visitor)?;
+                        self.content_start = None;
+                        self.markup_stream_offset = None;
+                        self.dtd_phase = DtdPhase::Idle;
+                    }
+                    _ => {
+                        if *dash_count >= 2 {
+                            return Err(ParseError::Xml(Error {
+                                kind: ErrorKind::DoubleDashInComment,
+                                offset: stream_offset + (abs - 2) as u64,
+                            }));
+                        }
+                        *dash_count = 0;
+                    }
+                },
+
+                DtdPhase::PITarget { name_start } => {
+                    if is_xml_whitespace(byte) || byte == b'?' {
+                        // End of PI target name
+                        if abs == name_start {
+                            return Err(ParseError::Xml(Error {
+                                kind: ErrorKind::UnexpectedByte(byte),
+                                offset: stream_offset + abs as u64,
+                            }));
+                        }
+                        let name = &buf[name_start..abs];
+                        if name.len() > MAX_NAME_LENGTH {
+                            return Err(ParseError::Xml(Error {
+                                kind: ErrorKind::NameTooLong,
+                                offset: stream_offset + name_start as u64,
+                            }));
+                        }
+                        let span = Span::new(
+                            stream_offset + self.markup_start.unwrap() as u64,
+                            stream_offset + abs as u64,
+                        );
+                        visitor.pi_start(name, span).map_err(ParseError::Visitor)?;
+                        // Clear markup_start for content body streaming.
+                        self.markup_stream_offset = Some(stream_offset + self.markup_start.unwrap() as u64);
+                        self.markup_start = None;
+                        if byte == b'?' {
+                            self.dtd_phase = DtdPhase::PIContent { saw_qmark: true };
+                        } else {
+                            self.dtd_phase = DtdPhase::PIContent { saw_qmark: false };
+                        }
+                        self.content_start = Some(abs + 1);
+                    } else if !is_name_byte(byte) {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::UnexpectedByte(byte),
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                },
+
+                DtdPhase::PIContent { ref mut saw_qmark } => match byte {
+                    b'?' => *saw_qmark = true,
+                    b'>' if *saw_qmark => {
+                        // End of PI
+                        let content_start = self.content_start.unwrap();
+                        let content_end = abs - 1; // exclude "?>"
+                        if content_end > content_start {
+                            let span = Span::new(
+                                stream_offset + content_start as u64,
+                                stream_offset + content_end as u64,
+                            );
+                            visitor.pi_content(&buf[content_start..content_end], span)
+                                .map_err(ParseError::Visitor)?;
+                        }
+                        let end_span = Span::new(
+                            stream_offset + (abs - 1) as u64,
+                            stream_offset + abs as u64 + 1,
+                        );
+                        visitor.pi_end(end_span).map_err(ParseError::Visitor)?;
+                        self.content_start = None;
+                        self.markup_stream_offset = None;
+                        self.dtd_phase = DtdPhase::Idle;
+                    }
+                    _ => *saw_qmark = false,
+                },
+
+                DtdPhase::MatchKeyword { kind, matched } => {
+                    let target = match kind {
+                        DtdDeclKind::Element => b"ELEMENT" as &[u8],
+                        DtdDeclKind::Attlist => b"ATTLIST",
+                        DtdDeclKind::Entity => b"ENTITY",
+                        DtdDeclKind::Notation => b"NOTATION",
+                    };
+
+                    // At matched == 1 for 'E', we need to disambiguate ELEMENT vs ENTITY
+                    if kind == DtdDeclKind::Element && matched == 1 {
+                        if byte == b'L' {
+                            // Still ELEMENT
+                            self.dtd_phase = DtdPhase::MatchKeyword { kind: DtdDeclKind::Element, matched: 2 };
+                        } else if byte == b'N' {
+                            // Switch to ENTITY
+                            self.dtd_phase = DtdPhase::MatchKeyword { kind: DtdDeclKind::Entity, matched: 2 };
+                        } else {
+                            return Err(ParseError::Xml(Error {
+                                kind: ErrorKind::DtdInvalidMarkup,
+                                offset: stream_offset + abs as u64,
+                            }));
+                        }
+                    } else if (matched as usize) < target.len() {
+                        if byte == target[matched as usize] {
+                            let new_matched = matched + 1;
+                            if (new_matched as usize) == target.len() {
+                                // Full keyword matched — require whitespace next
+                                match kind {
+                                    DtdDeclKind::Element => self.dtd_phase = DtdPhase::ElementRequireWs,
+                                    DtdDeclKind::Attlist => self.dtd_phase = DtdPhase::AttlistRequireWs,
+                                    DtdDeclKind::Entity => self.dtd_phase = DtdPhase::EntityRequireWs,
+                                    DtdDeclKind::Notation => self.dtd_phase = DtdPhase::NotationRequireWs,
+                                }
+                            } else {
+                                self.dtd_phase = DtdPhase::MatchKeyword { kind, matched: new_matched };
+                            }
+                        } else {
+                            return Err(ParseError::Xml(Error {
+                                kind: ErrorKind::DtdInvalidMarkup,
+                                offset: stream_offset + abs as u64,
+                            }));
+                        }
+                    }
+                },
+
+                // --- ELEMENT declaration ---
+                DtdPhase::ElementRequireWs => {
+                    if !is_xml_whitespace(byte) {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::DtdDeclMissingWhitespace,
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                    self.dtd_phase = DtdPhase::ElementBeforeName;
+                }
+                DtdPhase::ElementBeforeName => {
+                    if is_xml_whitespace(byte) { /* skip */ }
+                    else if is_name_start_byte(byte) {
+                        self.dtd_phase = DtdPhase::ElementName { name_start: abs };
+                    } else {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::DtdDeclMissingName,
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                }
+                DtdPhase::ElementName { name_start } => {
+                    if !is_name_byte(byte) {
+                        let name = validate_name(buf, name_start, abs, stream_offset)?;
+                        let span = Span::new(
+                            stream_offset + name_start as u64,
+                            stream_offset + abs as u64,
+                        );
+                        visitor.element_decl_start(name, span).map_err(ParseError::Visitor)?;
+                        self.dtd_phase = DtdPhase::ElementAfterName;
+                        continue; // reprocess this byte
+                    }
+                }
+                DtdPhase::ElementAfterName => {
+                    if is_xml_whitespace(byte) { /* skip */ }
+                    else if byte == b'(' {
+                        // Content model
+                        self.content_start = Some(abs);
+                        self.dtd_phase = DtdPhase::ElementContentModel { paren_depth: 1 };
+                    } else if byte == b'E' || byte == b'A' {
+                        // EMPTY or ANY
+                        self.dtd_phase = DtdPhase::ElementContentSpecKeyword { matched: 1 };
+                        // We store the start of the keyword for the span
+                        self.content_start = Some(abs);
+                    } else {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::UnexpectedByte(byte),
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                }
+                DtdPhase::ElementContentSpecKeyword { matched } => {
+                    // We're matching EMPTY or ANY
+                    let content_start = self.content_start.unwrap();
+                    let first = buf[content_start];
+                    let target: &[u8] = if first == b'E' { b"EMPTY" } else { b"ANY" };
+                    if (matched as usize) < target.len() {
+                        if byte == target[matched as usize] {
+                            let new_matched = matched + 1;
+                            if (new_matched as usize) == target.len() {
+                                let span = Span::new(
+                                    stream_offset + content_start as u64,
+                                    stream_offset + abs as u64 + 1,
+                                );
+                                if first == b'E' {
+                                    visitor.element_decl_empty(span).map_err(ParseError::Visitor)?;
+                                } else {
+                                    visitor.element_decl_any(span).map_err(ParseError::Visitor)?;
+                                }
+                                self.content_start = None;
+                                self.dtd_phase = DtdPhase::ElementAfterContentSpec;
+                            } else {
+                                self.dtd_phase = DtdPhase::ElementContentSpecKeyword { matched: new_matched };
+                            }
+                        } else {
+                            return Err(ParseError::Xml(Error {
+                                kind: ErrorKind::UnexpectedByte(byte),
+                                offset: stream_offset + abs as u64,
+                            }));
+                        }
+                    }
+                }
+                DtdPhase::ElementContentModel { ref mut paren_depth } => {
+                    match byte {
+                        b'(' => {
+                            *paren_depth += 1;
+                            if *paren_depth > Self::MAX_PAREN_DEPTH {
+                                return Err(ParseError::Xml(Error {
+                                    kind: ErrorKind::DtdParensTooDeep,
+                                    offset: stream_offset + abs as u64,
+                                }));
+                            }
+                        }
+                        b')' => {
+                            *paren_depth -= 1;
+                            if *paren_depth == 0 {
+                                // Check for trailing multiplicity character
+                                // We'll emit content_spec including everything up to and
+                                // including the closing `)` + optional `?`/`*`/`+` in the
+                                // next state.
+                                // But first, peek ahead for `?`/`*`/`+`
+                                let content_start = self.content_start.unwrap();
+                                if abs + 1 < buf.len() {
+                                    let next_byte = buf[abs + 1];
+                                    let end = if matches!(next_byte, b'?' | b'*' | b'+') {
+                                        abs + 2
+                                    } else {
+                                        abs + 1
+                                    };
+                                    let span = Span::new(
+                                        stream_offset + content_start as u64,
+                                        stream_offset + end as u64,
+                                    );
+                                    visitor.element_decl_content_spec(
+                                        &buf[content_start..end], span,
+                                    ).map_err(ParseError::Visitor)?;
+                                    self.content_start = None;
+                                    self.dtd_phase = DtdPhase::ElementAfterContentSpec;
+                                    pos = end - block_offset;
+                                    continue;
+                                } else {
+                                    // Buffer boundary — flush what we have, handle multiplicity later
+                                    let span = Span::new(
+                                        stream_offset + content_start as u64,
+                                        stream_offset + abs as u64 + 1,
+                                    );
+                                    visitor.element_decl_content_spec(
+                                        &buf[content_start..abs + 1], span,
+                                    ).map_err(ParseError::Visitor)?;
+                                    self.content_start = None;
+                                    self.dtd_phase = DtdPhase::ElementAfterContentSpec;
+                                }
+                            }
+                        }
+                        _ => { /* keep scanning */ }
+                    }
+                }
+                DtdPhase::ElementAfterContentSpec => {
+                    match byte {
+                        b'?' | b'*' | b'+' => {
+                            // Trailing multiplicity after content model — emit as content_spec
+                            // (only hit if we were at buffer boundary after `)`)
+                            if self.content_start.is_none() {
+                                let span = Span::new(
+                                    stream_offset + abs as u64,
+                                    stream_offset + abs as u64 + 1,
+                                );
+                                visitor.element_decl_content_spec(
+                                    &buf[abs..abs + 1], span,
+                                ).map_err(ParseError::Visitor)?;
+                            }
+                        }
+                        b'>' => {
+                            let span = Span::new(
+                                stream_offset + abs as u64,
+                                stream_offset + abs as u64 + 1,
+                            );
+                            visitor.element_decl_end(span).map_err(ParseError::Visitor)?;
+                            self.markup_start = None;
+                            self.dtd_phase = DtdPhase::Idle;
+                        }
+                        b if is_xml_whitespace(b) => { /* skip */ }
+                        _ => {
+                            return Err(ParseError::Xml(Error {
+                                kind: ErrorKind::UnexpectedByte(byte),
+                                offset: stream_offset + abs as u64,
+                            }));
+                        }
+                    }
+                }
+
+                // --- PE reference in internal subset ---
+                DtdPhase::PeRefName { name_start } => {
+                    if byte == b';' {
+                        let name = validate_name(buf, name_start, abs, stream_offset)?;
+                        let span = Span::new(
+                            stream_offset + (name_start - 1) as u64,
+                            stream_offset + abs as u64 + 1,
+                        );
+                        visitor.dtd_pe_reference(name, span).map_err(ParseError::Visitor)?;
+                        self.markup_start = None;
+                        self.dtd_phase = DtdPhase::Idle;
+                    } else {
+                        check_ref_name_byte(byte, abs, name_start, stream_offset)?;
+                    }
+                }
+
+                // --- ENTITY declaration ---
+                DtdPhase::EntityRequireWs => {
+                    if !is_xml_whitespace(byte) {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::DtdDeclMissingWhitespace,
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                    self.dtd_phase = DtdPhase::EntityCheckPercent;
+                }
+                DtdPhase::EntityCheckPercent => {
+                    if is_xml_whitespace(byte) { /* skip */ }
+                    else if byte == b'%' {
+                        self.dtd_phase = DtdPhase::EntityPercentRequireWs;
+                    } else if is_name_start_byte(byte) {
+                        self.dtd_phase = DtdPhase::EntityName { name_start: abs, kind: EntityKind::General };
+                    } else {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::DtdDeclMissingName,
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                }
+                DtdPhase::EntityPercentRequireWs => {
+                    if !is_xml_whitespace(byte) {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::DtdDeclMissingWhitespace,
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                    self.dtd_phase = DtdPhase::EntityBeforeName { kind: EntityKind::Parameter };
+                }
+                DtdPhase::EntityBeforeName { kind } => {
+                    if is_xml_whitespace(byte) { /* skip */ }
+                    else if is_name_start_byte(byte) {
+                        self.dtd_phase = DtdPhase::EntityName { name_start: abs, kind };
+                    } else {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::DtdDeclMissingName,
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                }
+                DtdPhase::EntityName { name_start, kind } => {
+                    if !is_name_byte(byte) {
+                        let name = validate_name(buf, name_start, abs, stream_offset)?;
+                        let span = Span::new(
+                            stream_offset + name_start as u64,
+                            stream_offset + abs as u64,
+                        );
+                        visitor.entity_decl_start(name, kind, span)
+                            .map_err(ParseError::Visitor)?;
+                        self.dtd_phase = DtdPhase::EntityBeforeDef { kind };
+                        continue;
+                    }
+                }
+                DtdPhase::EntityBeforeDef { kind } => {
+                    if is_xml_whitespace(byte) { /* skip */ }
+                    else {
+                        self.dtd_phase = DtdPhase::EntityDefStart { kind };
+                        continue;
+                    }
+                }
+                DtdPhase::EntityDefStart { kind } => {
+                    match byte {
+                        b'"' | b'\'' => {
+                            // Internal entity value
+                            let quote = if byte == b'"' { QuoteStyle::Double } else { QuoteStyle::Single };
+                            self.content_start = Some(abs + 1);
+                            self.dtd_phase = DtdPhase::EntityValue { quote };
+                        }
+                        b'S' => {
+                            let ctx = DtdDeclContext::Entity { kind };
+                            self.dtd_phase = DtdPhase::ExternalIdSystemKw { ctx, matched: 1 };
+                        }
+                        b'P' => {
+                            let ctx = DtdDeclContext::Entity { kind };
+                            self.dtd_phase = DtdPhase::ExternalIdPublicKw { ctx, matched: 1 };
+                        }
+                        _ => {
+                            return Err(ParseError::Xml(Error {
+                                kind: ErrorKind::UnexpectedByte(byte),
+                                offset: stream_offset + abs as u64,
+                            }));
+                        }
+                    }
+                }
+                DtdPhase::EntityValue { quote } => {
+                    let delim = if quote == QuoteStyle::Double { b'"' } else { b'\'' };
+                    match byte {
+                        b if b == delim => {
+                            // End of entity value
+                            let content_start = self.content_start.unwrap();
+                            if abs > content_start {
+                                let span = Span::new(
+                                    stream_offset + content_start as u64,
+                                    stream_offset + abs as u64,
+                                );
+                                visitor.entity_decl_value(&buf[content_start..abs], span)
+                                    .map_err(ParseError::Visitor)?;
+                            }
+                            let end_span = Span::new(
+                                stream_offset + abs as u64,
+                                stream_offset + abs as u64 + 1,
+                            );
+                            visitor.entity_decl_value_end(end_span).map_err(ParseError::Visitor)?;
+                            self.content_start = None;
+                            self.dtd_phase = DtdPhase::EntityBeforeClose;
+                        }
+                        b'&' => {
+                            // Entity or char ref in entity value
+                            let content_start = self.content_start.unwrap();
+                            if abs > content_start {
+                                let span = Span::new(
+                                    stream_offset + content_start as u64,
+                                    stream_offset + abs as u64,
+                                );
+                                visitor.entity_decl_value(&buf[content_start..abs], span)
+                                    .map_err(ParseError::Visitor)?;
+                            }
+                            // Look ahead to see if it's &#
+                            if abs + 1 < buf.len() && buf[abs + 1] == b'#' {
+                                self.dtd_phase = DtdPhase::EntityValueCharRef {
+                                    value_start: abs + 2,
+                                    quote,
+                                };
+                                pos += 1; // skip '#'
+                            } else {
+                                self.dtd_phase = DtdPhase::EntityValueEntityRef {
+                                    name_start: abs + 1,
+                                    quote,
+                                };
+                            }
+                            self.content_start = None;
+                        }
+                        b'%' => {
+                            // PE reference in entity value
+                            let content_start = self.content_start.unwrap();
+                            if abs > content_start {
+                                let span = Span::new(
+                                    stream_offset + content_start as u64,
+                                    stream_offset + abs as u64,
+                                );
+                                visitor.entity_decl_value(&buf[content_start..abs], span)
+                                    .map_err(ParseError::Visitor)?;
+                            }
+                            self.content_start = None;
+                            self.dtd_phase = DtdPhase::EntityValuePeRef {
+                                name_start: abs + 1,
+                                quote,
+                            };
+                        }
+                        _ => { /* keep scanning */ }
+                    }
+                }
+                DtdPhase::EntityValueEntityRef { name_start, quote } => {
+                    if byte == b';' {
+                        let name = validate_name(buf, name_start, abs, stream_offset)?;
+                        let span = Span::new(
+                            stream_offset + (name_start - 1) as u64,
+                            stream_offset + abs as u64 + 1,
+                        );
+                        visitor.entity_decl_entity_ref(name, span).map_err(ParseError::Visitor)?;
+                        self.content_start = Some(abs + 1);
+                        self.dtd_phase = DtdPhase::EntityValue { quote };
+                    } else if abs == name_start && byte == b'#' {
+                        // `&` was at buffer boundary, `#` arrived now → char ref
+                        self.dtd_phase = DtdPhase::EntityValueCharRef {
+                            value_start: abs + 1,
+                            quote,
+                        };
+                    } else {
+                        check_ref_name_byte(byte, abs, name_start, stream_offset)?;
+                    }
+                }
+                DtdPhase::EntityValueCharRef { value_start, quote } => {
+                    if byte == b';' {
+                        let value = validate_char_ref(buf, value_start, abs, stream_offset)?;
+                        let span = Span::new(
+                            stream_offset + (value_start - 2) as u64, // from `&#`
+                            stream_offset + abs as u64 + 1,
+                        );
+                        visitor.entity_decl_char_ref(value, span).map_err(ParseError::Visitor)?;
+                        self.content_start = Some(abs + 1);
+                        self.dtd_phase = DtdPhase::EntityValue { quote };
+                    }
+                    // Keep scanning — validation happens above
+                }
+                DtdPhase::EntityValuePeRef { name_start, quote } => {
+                    if byte == b';' {
+                        let name = validate_name(buf, name_start, abs, stream_offset)?;
+                        let span = Span::new(
+                            stream_offset + (name_start - 1) as u64,
+                            stream_offset + abs as u64 + 1,
+                        );
+                        visitor.entity_decl_pe_ref(name, span).map_err(ParseError::Visitor)?;
+                        self.content_start = Some(abs + 1);
+                        self.dtd_phase = DtdPhase::EntityValue { quote };
+                    } else {
+                        check_ref_name_byte(byte, abs, name_start, stream_offset)?;
+                    }
+                }
+                DtdPhase::EntityAfterExternalId { kind } => {
+                    match byte {
+                        b'>' => {
+                            let span = Span::new(
+                                stream_offset + abs as u64,
+                                stream_offset + abs as u64 + 1,
+                            );
+                            visitor.entity_decl_end(span).map_err(ParseError::Visitor)?;
+                            self.markup_start = None;
+                            self.dtd_phase = DtdPhase::Idle;
+                        }
+                        b'N' if kind == EntityKind::General => {
+                            self.dtd_phase = DtdPhase::EntityNdataKeyword { matched: 1 };
+                        }
+                        b if is_xml_whitespace(b) => { /* skip */ }
+                        _ => {
+                            return Err(ParseError::Xml(Error {
+                                kind: ErrorKind::UnexpectedByte(byte),
+                                offset: stream_offset + abs as u64,
+                            }));
+                        }
+                    }
+                }
+                DtdPhase::EntityNdataKeyword { matched } => {
+                    const NDATA: &[u8] = b"NDATA";
+                    if (matched as usize) < NDATA.len() {
+                        if byte == NDATA[matched as usize] {
+                            let new_matched = matched + 1;
+                            if (new_matched as usize) == NDATA.len() {
+                                self.dtd_phase = DtdPhase::EntityNdataRequireWs;
+                            } else {
+                                self.dtd_phase = DtdPhase::EntityNdataKeyword { matched: new_matched };
+                            }
+                        } else {
+                            return Err(ParseError::Xml(Error {
+                                kind: ErrorKind::UnexpectedByte(byte),
+                                offset: stream_offset + abs as u64,
+                            }));
+                        }
+                    }
+                }
+                DtdPhase::EntityNdataRequireWs => {
+                    if !is_xml_whitespace(byte) {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::DtdDeclMissingWhitespace,
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                    // Reuse EntityBeforeName-like scanning for the notation name
+                    self.dtd_phase = DtdPhase::EntityNdataName { name_start: usize::MAX };
+                }
+                DtdPhase::EntityNdataName { name_start } => {
+                    if name_start == usize::MAX {
+                        if is_xml_whitespace(byte) { /* skip */ }
+                        else if is_name_start_byte(byte) {
+                            self.dtd_phase = DtdPhase::EntityNdataName { name_start: abs };
+                        } else {
+                            return Err(ParseError::Xml(Error {
+                                kind: ErrorKind::DtdDeclMissingName,
+                                offset: stream_offset + abs as u64,
+                            }));
+                        }
+                    } else if !is_name_byte(byte) {
+                        let name = validate_name(buf, name_start, abs, stream_offset)?;
+                        let span = Span::new(
+                            stream_offset + name_start as u64,
+                            stream_offset + abs as u64,
+                        );
+                        visitor.entity_decl_ndata(name, span).map_err(ParseError::Visitor)?;
+                        self.dtd_phase = DtdPhase::EntityBeforeClose;
+                        continue;
+                    }
+                }
+                DtdPhase::EntityBeforeClose => {
+                    match byte {
+                        b'>' => {
+                            let span = Span::new(
+                                stream_offset + abs as u64,
+                                stream_offset + abs as u64 + 1,
+                            );
+                            visitor.entity_decl_end(span).map_err(ParseError::Visitor)?;
+                            self.markup_start = None;
+                            self.dtd_phase = DtdPhase::Idle;
+                        }
+                        b if is_xml_whitespace(b) => { /* skip */ }
+                        _ => {
+                            return Err(ParseError::Xml(Error {
+                                kind: ErrorKind::UnexpectedByte(byte),
+                                offset: stream_offset + abs as u64,
+                            }));
+                        }
+                    }
+                }
+
+                // --- Shared External ID scanning ---
+                DtdPhase::ExternalIdSystemKw { ctx, matched } => {
+                    const SYSTEM: &[u8] = b"SYSTEM";
+                    if (matched as usize) < SYSTEM.len() {
+                        if byte == SYSTEM[matched as usize] {
+                            let new_matched = matched + 1;
+                            if (new_matched as usize) == SYSTEM.len() {
+                                self.dtd_phase = DtdPhase::ExternalIdBeforeSystemLit { ctx };
+                            } else {
+                                self.dtd_phase = DtdPhase::ExternalIdSystemKw { ctx, matched: new_matched };
+                            }
+                        } else {
+                            return Err(ParseError::Xml(Error {
+                                kind: ErrorKind::UnexpectedByte(byte),
+                                offset: stream_offset + abs as u64,
+                            }));
+                        }
+                    }
+                }
+                DtdPhase::ExternalIdPublicKw { ctx, matched } => {
+                    const PUBLIC: &[u8] = b"PUBLIC";
+                    if (matched as usize) < PUBLIC.len() {
+                        if byte == PUBLIC[matched as usize] {
+                            let new_matched = matched + 1;
+                            if (new_matched as usize) == PUBLIC.len() {
+                                self.dtd_phase = DtdPhase::ExternalIdBeforePublicLit { ctx };
+                            } else {
+                                self.dtd_phase = DtdPhase::ExternalIdPublicKw { ctx, matched: new_matched };
+                            }
+                        } else {
+                            return Err(ParseError::Xml(Error {
+                                kind: ErrorKind::UnexpectedByte(byte),
+                                offset: stream_offset + abs as u64,
+                            }));
+                        }
+                    }
+                }
+                DtdPhase::ExternalIdBeforeSystemLit { ctx } => {
+                    if is_xml_whitespace(byte) { /* skip */ }
+                    else if byte == b'"' || byte == b'\'' {
+                        let quote = if byte == b'"' { QuoteStyle::Double } else { QuoteStyle::Single };
+                        self.dtd_phase = DtdPhase::ExternalIdSystemLit { ctx, quote, literal_start: abs + 1 };
+                    } else {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::UnexpectedByte(byte),
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                }
+                DtdPhase::ExternalIdSystemLit { ctx, quote, literal_start } => {
+                    let delim = if quote == QuoteStyle::Double { b'"' } else { b'\'' };
+                    if byte == delim {
+                        let literal = &buf[literal_start..abs];
+                        if literal.len() > Self::MAX_LITERAL_LENGTH {
+                            return Err(ParseError::Xml(Error {
+                                kind: ErrorKind::LiteralTooLong,
+                                offset: stream_offset + literal_start as u64,
+                            }));
+                        }
+                        let span = Span::new(
+                            stream_offset + literal_start as u64,
+                            stream_offset + abs as u64,
+                        );
+                        match ctx {
+                            DtdDeclContext::Entity { .. } => {
+                                visitor.entity_decl_system_id(literal, span)
+                                    .map_err(ParseError::Visitor)?;
+                            }
+                            DtdDeclContext::Notation => {
+                                visitor.notation_decl_system_id(literal, span)
+                                    .map_err(ParseError::Visitor)?;
+                            }
+                        }
+                        match ctx {
+                            DtdDeclContext::Entity { kind } => {
+                                self.dtd_phase = DtdPhase::EntityAfterExternalId { kind };
+                            }
+                            DtdDeclContext::Notation => {
+                                self.dtd_phase = DtdPhase::NotationBeforeClose;
+                            }
+                        }
+                    }
+                }
+                DtdPhase::ExternalIdBeforePublicLit { ctx } => {
+                    if is_xml_whitespace(byte) { /* skip */ }
+                    else if byte == b'"' || byte == b'\'' {
+                        let quote = if byte == b'"' { QuoteStyle::Double } else { QuoteStyle::Single };
+                        self.dtd_phase = DtdPhase::ExternalIdPublicLit { ctx, quote, literal_start: abs + 1 };
+                    } else {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::UnexpectedByte(byte),
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                }
+                DtdPhase::ExternalIdPublicLit { ctx, quote, literal_start } => {
+                    let delim = if quote == QuoteStyle::Double { b'"' } else { b'\'' };
+                    if byte == delim {
+                        let literal = &buf[literal_start..abs];
+                        if literal.len() > Self::MAX_LITERAL_LENGTH {
+                            return Err(ParseError::Xml(Error {
+                                kind: ErrorKind::LiteralTooLong,
+                                offset: stream_offset + literal_start as u64,
+                            }));
+                        }
+                        let span = Span::new(
+                            stream_offset + literal_start as u64,
+                            stream_offset + abs as u64,
+                        );
+                        match ctx {
+                            DtdDeclContext::Entity { .. } => {
+                                visitor.entity_decl_public_id(literal, span)
+                                    .map_err(ParseError::Visitor)?;
+                            }
+                            DtdDeclContext::Notation => {
+                                visitor.notation_decl_public_id(literal, span)
+                                    .map_err(ParseError::Visitor)?;
+                            }
+                        }
+                        self.dtd_phase = DtdPhase::ExternalIdBetweenLiterals { ctx };
+                    }
+                }
+                DtdPhase::ExternalIdBetweenLiterals { ctx } => {
+                    if is_xml_whitespace(byte) { /* skip */ }
+                    else if byte == b'"' || byte == b'\'' {
+                        // System literal follows public literal
+                        let quote = if byte == b'"' { QuoteStyle::Double } else { QuoteStyle::Single };
+                        self.dtd_phase = DtdPhase::ExternalIdSystemLit { ctx, quote, literal_start: abs + 1 };
+                    } else if byte == b'>' {
+                        // PUBLIC with no system literal (NOTATION only allows this)
+                        match ctx {
+                            DtdDeclContext::Notation => {
+                                let span = Span::new(
+                                    stream_offset + abs as u64,
+                                    stream_offset + abs as u64 + 1,
+                                );
+                                visitor.notation_decl_end(span).map_err(ParseError::Visitor)?;
+                                self.markup_start = None;
+                                self.dtd_phase = DtdPhase::Idle;
+                            }
+                            _ => {
+                                return Err(ParseError::Xml(Error {
+                                    kind: ErrorKind::UnexpectedByte(byte),
+                                    offset: stream_offset + abs as u64,
+                                }));
+                            }
+                        }
+                    } else {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::UnexpectedByte(byte),
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                }
+
+                // --- NOTATION declaration ---
+                DtdPhase::NotationRequireWs => {
+                    if !is_xml_whitespace(byte) {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::DtdDeclMissingWhitespace,
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                    self.dtd_phase = DtdPhase::NotationBeforeName;
+                }
+                DtdPhase::NotationBeforeName => {
+                    if is_xml_whitespace(byte) { /* skip */ }
+                    else if is_name_start_byte(byte) {
+                        self.dtd_phase = DtdPhase::NotationName { name_start: abs };
+                    } else {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::DtdDeclMissingName,
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                }
+                DtdPhase::NotationName { name_start } => {
+                    if !is_name_byte(byte) {
+                        let name = validate_name(buf, name_start, abs, stream_offset)?;
+                        let span = Span::new(
+                            stream_offset + name_start as u64,
+                            stream_offset + abs as u64,
+                        );
+                        visitor.notation_decl_start(name, span).map_err(ParseError::Visitor)?;
+                        self.dtd_phase = DtdPhase::NotationBeforeDef;
+                        continue;
+                    }
+                }
+                DtdPhase::NotationBeforeDef => {
+                    if is_xml_whitespace(byte) { /* skip */ }
+                    else if byte == b'S' {
+                        let ctx = DtdDeclContext::Notation;
+                        self.dtd_phase = DtdPhase::ExternalIdSystemKw { ctx, matched: 1 };
+                    } else if byte == b'P' {
+                        let ctx = DtdDeclContext::Notation;
+                        self.dtd_phase = DtdPhase::ExternalIdPublicKw { ctx, matched: 1 };
+                    } else {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::UnexpectedByte(byte),
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                }
+                DtdPhase::NotationBeforeClose => {
+                    match byte {
+                        b'>' => {
+                            let span = Span::new(
+                                stream_offset + abs as u64,
+                                stream_offset + abs as u64 + 1,
+                            );
+                            visitor.notation_decl_end(span).map_err(ParseError::Visitor)?;
+                            self.markup_start = None;
+                            self.dtd_phase = DtdPhase::Idle;
+                        }
+                        b if is_xml_whitespace(b) => { /* skip */ }
+                        _ => {
+                            return Err(ParseError::Xml(Error {
+                                kind: ErrorKind::UnexpectedByte(byte),
+                                offset: stream_offset + abs as u64,
+                            }));
+                        }
+                    }
+                }
+
+                // --- ATTLIST declaration ---
+                DtdPhase::AttlistRequireWs => {
+                    if !is_xml_whitespace(byte) {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::DtdDeclMissingWhitespace,
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                    self.dtd_phase = DtdPhase::AttlistBeforeName;
+                }
+                DtdPhase::AttlistBeforeName => {
+                    if is_xml_whitespace(byte) { /* skip */ }
+                    else if is_name_start_byte(byte) {
+                        self.dtd_phase = DtdPhase::AttlistName { name_start: abs };
+                    } else {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::DtdDeclMissingName,
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                }
+                DtdPhase::AttlistName { name_start } => {
+                    if !is_name_byte(byte) {
+                        let name = validate_name(buf, name_start, abs, stream_offset)?;
+                        let span = Span::new(
+                            stream_offset + name_start as u64,
+                            stream_offset + abs as u64,
+                        );
+                        visitor.attlist_decl_start(name, span).map_err(ParseError::Visitor)?;
+                        self.dtd_phase = DtdPhase::AttlistIdle;
+                        continue;
+                    }
+                }
+                DtdPhase::AttlistIdle => {
+                    if is_xml_whitespace(byte) { /* skip */ }
+                    else if byte == b'>' {
+                        let span = Span::new(
+                            stream_offset + abs as u64,
+                            stream_offset + abs as u64 + 1,
+                        );
+                        visitor.attlist_decl_end(span).map_err(ParseError::Visitor)?;
+                        self.markup_start = None;
+                        self.dtd_phase = DtdPhase::Idle;
+                    } else if is_name_start_byte(byte) {
+                        self.dtd_phase = DtdPhase::AttlistAttrName { name_start: abs };
+                    } else {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::UnexpectedByte(byte),
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                }
+                DtdPhase::AttlistAttrName { name_start } => {
+                    if !is_name_byte(byte) {
+                        let name = validate_name(buf, name_start, abs, stream_offset)?;
+                        let span = Span::new(
+                            stream_offset + name_start as u64,
+                            stream_offset + abs as u64,
+                        );
+                        visitor.attlist_attr_name(name, span).map_err(ParseError::Visitor)?;
+                        self.dtd_phase = DtdPhase::AttlistBeforeType;
+                        continue;
+                    }
+                }
+                DtdPhase::AttlistBeforeType => {
+                    if is_xml_whitespace(byte) { /* skip */ }
+                    else {
+                        self.dtd_phase = DtdPhase::AttlistTypeStart;
+                        continue;
+                    }
+                }
+                DtdPhase::AttlistTypeStart => {
+                    if byte == b'(' {
+                        // Enumeration type
+                        self.content_start = Some(abs);
+                        self.dtd_phase = DtdPhase::AttlistTypeEnum { paren_depth: 1 };
+                    } else if byte == b'N' {
+                        // Could be NOTATION, NMTOKEN, NMTOKENS
+                        self.content_start = Some(abs);
+                        self.dtd_phase = DtdPhase::AttlistTypeKeyword { start: abs };
+                    } else if byte.is_ascii_alphabetic() {
+                        // Other keyword: CDATA, ID, IDREF, IDREFS, ENTITY, ENTITIES
+                        self.content_start = Some(abs);
+                        self.dtd_phase = DtdPhase::AttlistTypeKeyword { start: abs };
+                    } else {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::UnexpectedByte(byte),
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                }
+                DtdPhase::AttlistTypeKeyword { start } => {
+                    if is_xml_whitespace(byte) || byte == b'(' || byte == b'#' || byte == b'"' || byte == b'\'' {
+                        // End of type keyword
+                        let content = &buf[start..abs];
+                        let span = Span::new(
+                            stream_offset + start as u64,
+                            stream_offset + abs as u64,
+                        );
+                        visitor.attlist_attr_type(content, span).map_err(ParseError::Visitor)?;
+                        self.content_start = None;
+
+                        // Check if this was NOTATION — if so, expect `(` for enumeration
+                        if content == b"NOTATION" {
+                            self.dtd_phase = DtdPhase::AttlistTypeNotationBeforeParen;
+                            continue;
+                        }
+
+                        self.dtd_phase = DtdPhase::AttlistBeforeDefault;
+                        continue;
+                    }
+                    // Keep scanning keyword
+                }
+                DtdPhase::AttlistTypeNotationBeforeParen => {
+                    if is_xml_whitespace(byte) { /* skip */ }
+                    else if byte == b'(' {
+                        self.content_start = Some(abs);
+                        self.dtd_phase = DtdPhase::AttlistTypeEnum { paren_depth: 1 };
+                    } else {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::UnexpectedByte(byte),
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                }
+                DtdPhase::AttlistTypeEnum { ref mut paren_depth } => {
+                    match byte {
+                        b'(' => {
+                            *paren_depth += 1;
+                            if *paren_depth > Self::MAX_PAREN_DEPTH {
+                                return Err(ParseError::Xml(Error {
+                                    kind: ErrorKind::DtdParensTooDeep,
+                                    offset: stream_offset + abs as u64,
+                                }));
+                            }
+                        }
+                        b')' => {
+                            *paren_depth -= 1;
+                            if *paren_depth == 0 {
+                                let content_start = self.content_start.unwrap();
+                                let span = Span::new(
+                                    stream_offset + content_start as u64,
+                                    stream_offset + abs as u64 + 1,
+                                );
+                                visitor.attlist_attr_type(&buf[content_start..abs + 1], span)
+                                    .map_err(ParseError::Visitor)?;
+                                self.content_start = None;
+                                self.dtd_phase = DtdPhase::AttlistBeforeDefault;
+                            }
+                        }
+                        _ => { /* keep scanning */ }
+                    }
+                }
+                DtdPhase::AttlistBeforeDefault => {
+                    if is_xml_whitespace(byte) { /* skip */ }
+                    else if byte == b'#' {
+                        self.dtd_phase = DtdPhase::AttlistDefaultHash { start: abs };
+                    } else if byte == b'"' || byte == b'\'' {
+                        // Plain default value (no keyword)
+                        let quote = if byte == b'"' { QuoteStyle::Double } else { QuoteStyle::Single };
+                        let span = Span::new(
+                            stream_offset + abs as u64,
+                            stream_offset + abs as u64 + 1,
+                        );
+                        visitor.attlist_attr_default_start(false, span).map_err(ParseError::Visitor)?;
+                        self.content_start = Some(abs + 1);
+                        self.dtd_phase = DtdPhase::AttlistDefaultValue { quote };
+                    } else {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::UnexpectedByte(byte),
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                }
+                DtdPhase::AttlistDefaultHash { start } => {
+                    // Matching #REQUIRED, #IMPLIED, or #FIXED
+                    if is_xml_whitespace(byte) || byte == b'>' || byte == b'"' || byte == b'\'' {
+                        let keyword = &buf[start..abs];
+                        let span = Span::new(
+                            stream_offset + start as u64,
+                            stream_offset + abs as u64,
+                        );
+                        match keyword {
+                            b"#REQUIRED" => {
+                                visitor.attlist_attr_required(span).map_err(ParseError::Visitor)?;
+                                self.dtd_phase = DtdPhase::AttlistIdle;
+                                continue;
+                            }
+                            b"#IMPLIED" => {
+                                visitor.attlist_attr_implied(span).map_err(ParseError::Visitor)?;
+                                self.dtd_phase = DtdPhase::AttlistIdle;
+                                continue;
+                            }
+                            b"#FIXED" => {
+                                self.dtd_phase = DtdPhase::AttlistFixedBeforeValue;
+                                continue;
+                            }
+                            _ => {
+                                return Err(ParseError::Xml(Error {
+                                    kind: ErrorKind::UnexpectedByte(byte),
+                                    offset: stream_offset + start as u64,
+                                }));
+                            }
+                        }
+                    }
+                    // Keep scanning keyword characters
+                }
+                DtdPhase::AttlistFixedBeforeValue => {
+                    if is_xml_whitespace(byte) { /* skip */ }
+                    else if byte == b'"' || byte == b'\'' {
+                        let quote = if byte == b'"' { QuoteStyle::Double } else { QuoteStyle::Single };
+                        let span = Span::new(
+                            stream_offset + abs as u64,
+                            stream_offset + abs as u64 + 1,
+                        );
+                        visitor.attlist_attr_default_start(true, span).map_err(ParseError::Visitor)?;
+                        self.content_start = Some(abs + 1);
+                        self.dtd_phase = DtdPhase::AttlistDefaultValue { quote };
+                    } else {
+                        return Err(ParseError::Xml(Error {
+                            kind: ErrorKind::UnexpectedByte(byte),
+                            offset: stream_offset + abs as u64,
+                        }));
+                    }
+                }
+                DtdPhase::AttlistDefaultValue { quote } => {
+                    let delim = if quote == QuoteStyle::Double { b'"' } else { b'\'' };
+                    match byte {
+                        b if b == delim => {
+                            let content_start = self.content_start.unwrap();
+                            if abs > content_start {
+                                let span = Span::new(
+                                    stream_offset + content_start as u64,
+                                    stream_offset + abs as u64,
+                                );
+                                visitor.attlist_attr_default_value(&buf[content_start..abs], span)
+                                    .map_err(ParseError::Visitor)?;
+                            }
+                            let end_span = Span::new(
+                                stream_offset + abs as u64,
+                                stream_offset + abs as u64 + 1,
+                            );
+                            visitor.attlist_attr_default_end(end_span).map_err(ParseError::Visitor)?;
+                            self.content_start = None;
+                            self.dtd_phase = DtdPhase::AttlistIdle;
+                        }
+                        b'&' => {
+                            let content_start = self.content_start.unwrap();
+                            if abs > content_start {
+                                let span = Span::new(
+                                    stream_offset + content_start as u64,
+                                    stream_offset + abs as u64,
+                                );
+                                visitor.attlist_attr_default_value(&buf[content_start..abs], span)
+                                    .map_err(ParseError::Visitor)?;
+                            }
+                            if abs + 1 < buf.len() && buf[abs + 1] == b'#' {
+                                self.dtd_phase = DtdPhase::AttlistDefaultCharRef {
+                                    value_start: abs + 2,
+                                    quote,
+                                };
+                                pos += 1;
+                            } else {
+                                self.dtd_phase = DtdPhase::AttlistDefaultEntityRef {
+                                    name_start: abs + 1,
+                                    quote,
+                                };
+                            }
+                            self.content_start = None;
+                        }
+                        _ => { /* keep scanning */ }
+                    }
+                }
+                DtdPhase::AttlistDefaultEntityRef { name_start, quote } => {
+                    if byte == b';' {
+                        let name = validate_name(buf, name_start, abs, stream_offset)?;
+                        let span = Span::new(
+                            stream_offset + (name_start - 1) as u64,
+                            stream_offset + abs as u64 + 1,
+                        );
+                        visitor.attlist_attr_default_entity_ref(name, span)
+                            .map_err(ParseError::Visitor)?;
+                        self.content_start = Some(abs + 1);
+                        self.dtd_phase = DtdPhase::AttlistDefaultValue { quote };
+                    } else if abs == name_start && byte == b'#' {
+                        // `&` was at buffer boundary, `#` arrived now → char ref
+                        self.dtd_phase = DtdPhase::AttlistDefaultCharRef {
+                            value_start: abs + 1,
+                            quote,
+                        };
+                    } else {
+                        check_ref_name_byte(byte, abs, name_start, stream_offset)?;
+                    }
+                }
+                DtdPhase::AttlistDefaultCharRef { value_start, quote } => {
+                    if byte == b';' {
+                        let value = validate_char_ref(buf, value_start, abs, stream_offset)?;
+                        let span = Span::new(
+                            stream_offset + (value_start - 2) as u64,
+                            stream_offset + abs as u64 + 1,
+                        );
+                        visitor.attlist_attr_default_char_ref(value, span)
+                            .map_err(ParseError::Visitor)?;
+                        self.content_start = Some(abs + 1);
+                        self.dtd_phase = DtdPhase::AttlistDefaultValue { quote };
+                    }
+                }
+            }
+
+            pos += 1;
+        }
+
+        Ok(block_len)
+    }
+
+    /// Scan after `]` closing the internal subset, expecting optional whitespace then `>`.
+    #[cfg(feature = "dtd")]
+    fn scan_doctype_after_subset<V: Visitor>(
+        &mut self,
+        buf: &[u8],
+        block_offset: usize,
+        block_len: usize,
+        mut pos: usize,
+        stream_offset: u64,
+        visitor: &mut V,
+    ) -> Result<usize, ParseError<V::Error>> {
+        while pos < block_len {
+            let abs = block_offset + pos;
+            let byte = buf[abs];
+            match byte {
+                b'>' => {
+                    let end_span = Span::new(
+                        stream_offset + abs as u64,
+                        stream_offset + abs as u64 + 1,
+                    );
+                    visitor.doctype_end(end_span).map_err(ParseError::Visitor)?;
+                    self.finish_content_body();
+                    return Ok(pos + 1);
+                }
+                b if is_xml_whitespace(b) => { /* skip */ }
+                _ => {
+                    return Err(ParseError::Xml(Error {
+                        kind: ErrorKind::UnexpectedByte(byte),
+                        offset: stream_offset + abs as u64,
+                    }));
+                }
+            }
+            pos += 1;
+        }
+        Ok(block_len)
+    }
+
+    /// Flush DTD content at buffer boundaries based on current dtd_phase.
+    #[cfg(feature = "dtd")]
+    fn flush_dtd_content<V: Visitor>(
+        &mut self,
+        content: &[u8],
+        span: Span,
+        visitor: &mut V,
+    ) -> Result<(), ParseError<V::Error>> {
+        match self.dtd_phase {
+            DtdPhase::Comment { .. } => {
+                visitor.comment_content(content, span).map_err(ParseError::Visitor)?;
+            }
+            DtdPhase::PIContent { .. } => {
+                visitor.pi_content(content, span).map_err(ParseError::Visitor)?;
+            }
+            DtdPhase::ElementContentModel { .. } => {
+                visitor.element_decl_content_spec(content, span).map_err(ParseError::Visitor)?;
+            }
+            DtdPhase::EntityValue { .. } => {
+                visitor.entity_decl_value(content, span).map_err(ParseError::Visitor)?;
+            }
+            DtdPhase::AttlistTypeEnum { .. } | DtdPhase::AttlistTypeKeyword { .. } => {
+                visitor.attlist_attr_type(content, span).map_err(ParseError::Visitor)?;
+            }
+            DtdPhase::AttlistDefaultValue { .. } => {
+                visitor.attlist_attr_default_value(content, span).map_err(ParseError::Visitor)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
 }
 
 /// Find where a name ends in the current block.
@@ -2214,20 +3660,7 @@ fn find_and_validate_entity_name<'a, E>(
     }
 
     let semi_abs = block_offset + pos + next;
-    let name = &buf[name_start..semi_abs];
-
-    if name.is_empty() {
-        return Err(ParseError::Xml(Error {
-            kind: ErrorKind::UnexpectedByte(b';'),
-            offset: stream_offset + semi_abs as u64,
-        }));
-    }
-    if name.len() > MAX_NAME_LENGTH {
-        return Err(ParseError::Xml(Error {
-            kind: ErrorKind::NameTooLong,
-            offset: stream_offset + name_start as u64,
-        }));
-    }
+    let name = validate_name(buf, name_start, semi_abs, stream_offset)?;
     if !is_name_start_byte(name[0]) {
         return Err(ParseError::Xml(Error {
             kind: ErrorKind::UnexpectedByte(name[0]),
@@ -2288,20 +3721,7 @@ fn find_and_validate_char_ref<'a, E>(
     }
 
     let semi_abs = block_offset + pos + next;
-    let value = &buf[value_start..semi_abs];
-
-    if value.is_empty() {
-        return Err(ParseError::Xml(Error {
-            kind: ErrorKind::InvalidCharRef,
-            offset: stream_offset + semi_abs as u64,
-        }));
-    }
-    if value.len() > MAX_CHAR_REF_LENGTH {
-        return Err(ParseError::Xml(Error {
-            kind: ErrorKind::CharRefTooLong,
-            offset: stream_offset + value_start as u64,
-        }));
-    }
+    let value = validate_char_ref(buf, value_start, semi_abs, stream_offset)?;
     if value[0] == b'x' {
         let hex_digits = &value[1..];
         if hex_digits.is_empty() || !hex_digits.iter().all(|b| b.is_ascii_hexdigit()) {
@@ -2322,6 +3742,57 @@ fn find_and_validate_char_ref<'a, E>(
         stream_offset + semi_abs as u64,
     );
     Ok(Some((value, span, pos + next + 1)))
+}
+
+/// Validate a single byte during reference name scanning.
+///
+/// Checks `is_name_start_byte` for the first byte and `is_name_byte` for subsequent bytes.
+#[inline]
+fn check_ref_name_byte<E>(
+    byte: u8,
+    abs: usize,
+    name_start: usize,
+    stream_offset: u64,
+) -> Result<(), ParseError<E>> {
+    if abs == name_start && !is_name_start_byte(byte) {
+        return Err(ParseError::Xml(Error {
+            kind: ErrorKind::UnexpectedByte(byte),
+            offset: stream_offset + abs as u64,
+        }));
+    }
+    if abs > name_start && !is_name_byte(byte) {
+        return Err(ParseError::Xml(Error {
+            kind: ErrorKind::UnexpectedByte(byte),
+            offset: stream_offset + abs as u64,
+        }));
+    }
+    Ok(())
+}
+
+/// Validate a completed char ref value: check it is non-empty and within the length limit.
+///
+/// Returns the value slice on success.
+#[inline]
+fn validate_char_ref<'a, E>(
+    buf: &'a [u8],
+    value_start: usize,
+    value_end: usize,
+    stream_offset: u64,
+) -> Result<&'a [u8], ParseError<E>> {
+    let value = &buf[value_start..value_end];
+    if value.is_empty() {
+        return Err(ParseError::Xml(Error {
+            kind: ErrorKind::InvalidCharRef,
+            offset: stream_offset + value_end as u64,
+        }));
+    }
+    if value.len() > MAX_CHAR_REF_LENGTH {
+        return Err(ParseError::Xml(Error {
+            kind: ErrorKind::CharRefTooLong,
+            offset: stream_offset + value_start as u64,
+        }));
+    }
+    Ok(value)
 }
 
 /// Find the first non-whitespace character in the current block.

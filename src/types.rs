@@ -1,3 +1,12 @@
+/// Whether an `<!ENTITY ...>` declaration defines a general or parameter entity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntityKind {
+    /// General entity, e.g. `<!ENTITY name "value">`.
+    General,
+    /// Parameter entity, e.g. `<!ENTITY % name "value">`.
+    Parameter,
+}
+
 /// Absolute byte range in the input stream.
 /// `start` is inclusive, `end` is exclusive: `[start, end)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,12 +70,20 @@ pub enum ErrorKind {
     NameTooLong,
     /// Character reference value exceeded the 7-byte limit.
     CharRefTooLong,
-    /// DOCTYPE internal subset bracket nesting exceeded the 1024 depth limit.
-    DoctypeBracketsTooDeep,
     /// Malformed XML declaration (missing version, bad syntax, invalid standalone value).
     MalformedXmlDeclaration,
     /// PI target matching `[Xx][Mm][Ll]` appeared after the document start.
     ReservedPITarget,
+    /// Unrecognized `<!` construct inside DTD internal subset.
+    DtdInvalidMarkup,
+    /// Missing whitespace after DTD declaration keyword.
+    DtdDeclMissingWhitespace,
+    /// Missing or invalid name in DTD declaration.
+    DtdDeclMissingName,
+    /// System or public literal exceeded the 8192-byte limit.
+    LiteralTooLong,
+    /// Parenthesis nesting in element content model or enumerated type exceeded depth limit.
+    DtdParensTooDeep,
 }
 
 impl core::fmt::Display for ErrorKind {
@@ -86,14 +103,26 @@ impl core::fmt::Display for ErrorKind {
             ErrorKind::InvalidUtf8 => write!(f, "invalid UTF-8"),
             ErrorKind::NameTooLong => write!(f, "name exceeds 1000-byte limit"),
             ErrorKind::CharRefTooLong => write!(f, "character reference exceeds 7-byte limit"),
-            ErrorKind::DoctypeBracketsTooDeep => {
-                write!(f, "DOCTYPE bracket nesting exceeds 1024 depth limit")
-            }
             ErrorKind::MalformedXmlDeclaration => {
                 write!(f, "malformed XML declaration")
             }
             ErrorKind::ReservedPITarget => {
                 write!(f, "reserved PI target (xml) after document start")
+            }
+            ErrorKind::DtdInvalidMarkup => {
+                write!(f, "unrecognized markup in DTD internal subset")
+            }
+            ErrorKind::DtdDeclMissingWhitespace => {
+                write!(f, "missing whitespace after DTD declaration keyword")
+            }
+            ErrorKind::DtdDeclMissingName => {
+                write!(f, "missing or invalid name in DTD declaration")
+            }
+            ErrorKind::LiteralTooLong => {
+                write!(f, "system or public literal exceeds 8192-byte limit")
+            }
+            ErrorKind::DtdParensTooDeep => {
+                write!(f, "parenthesis nesting exceeds depth limit in DTD")
             }
         }
     }

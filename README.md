@@ -245,6 +245,39 @@ Text content, attribute values, and content bodies (comments, CDATA, PIs, DOCTYP
 
 All `unsafe` code is confined to SIMD intrinsics in `src/bitstream/`. The parser logic itself contains no `unsafe` blocks.
 
+## DTD Support
+
+The optional `dtd` cargo feature enables full tokenization of DTD internal subsets:
+
+```toml
+[dependencies]
+xml-syntax-reader = { version = "...", features = ["dtd"] }
+```
+
+When enabled, the parser tokenizes declarations inside `<!DOCTYPE name [ ... ]>` instead of delivering them as opaque `doctype_content` chunks. The `Visitor` trait provides callbacks for:
+
+| Declaration | Callbacks |
+|---|---|
+| `<!ELEMENT>` | `element_decl_start`, `element_decl_empty` / `element_decl_any` / `element_decl_content_spec`, `element_decl_end` |
+| `<!ATTLIST>` | `attlist_decl_start`, `attlist_attr_name`, `attlist_attr_type`, `attlist_attr_required` / `attlist_attr_implied` / `attlist_attr_default_*`, `attlist_decl_end` |
+| `<!ENTITY>` | `entity_decl_start` (with `is_parameter` flag), `entity_decl_value` / `entity_decl_system_id` / `entity_decl_public_id` / `entity_decl_ndata`, `entity_decl_end` |
+| `<!NOTATION>` | `notation_decl_start`, `notation_decl_system_id` / `notation_decl_public_id`, `notation_decl_end` |
+| `%name;` | `dtd_pe_reference` |
+| Comments / PIs | Same callbacks as outside DTD |
+
+Entity declaration values and ATTLIST default values are streamed with interleaved `entity_ref`, `char_ref`, and `pe_ref` callbacks, just like attribute values in the main document.
+
+ELEMENT content models (e.g. `(a|b,(c,d)*)`) are delivered as raw bytes via `element_decl_content_spec` with parenthesis depth tracked by the parser.
+
+The DTD visitor methods are defined on the `Visitor` trait unconditionally (with default no-op implementations), so visitor code compiles with or without the feature. Only the parser logic is gated.
+
+Additional errors with `dtd` enabled:
+
+| Error | Trigger |
+|---|---|
+| `LiteralTooLong` | System/public literal exceeds 8,192-byte limit |
+| `DtdParensTooDeep` | Content model / enumeration parenthesis nesting exceeds limit |
+
 ## Beyond Syntax
 
 This crate is a syntax reader, not a conformant XML processor. If you are building a higher-level layer on top (namespace resolution, DOM construction, validation), you need to know exactly what gaps exist relative to the [XML Information Set](https://www.w3.org/TR/xml-infoset/). This section catalogs them.
@@ -274,7 +307,7 @@ The XML Information Set defines these as properties of information items. This p
 
 ### DTD and external features not processed
 
-- **Internal subset** - delivered as opaque `doctype_content` chunks. Entity, notation, and attlist declarations within it are not parsed.
+- **Internal subset** - without the `dtd` feature, delivered as opaque `doctype_content` chunks. With the `dtd` feature enabled, declarations are fully tokenized (see [DTD Support](#dtd-support)), but their semantics are not applied (no entity expansion, no attribute defaulting, no content model validation).
 - **External subset** - not fetched or processed.
 - **External entities** - not resolved.
 - **Standalone enforcement** - `standalone="yes"` is parsed and reported via `xml_declaration`, but its constraints (no external markup declarations affecting content, no attribute defaulting, no normalization changes) are not enforced.

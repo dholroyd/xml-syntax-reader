@@ -9,6 +9,7 @@ repository = "https://github.com/dholroyd/xml-syntax-reader"
 [features]
 default = ["std"]
 std = ["memchr/std"]
+dtd = []
 
 [dependencies]
 memchr = { version = "2", default-features = false }
