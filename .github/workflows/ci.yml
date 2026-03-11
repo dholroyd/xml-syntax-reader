@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # On x86_64 the runtime dispatch picks AVX2, so SSE2 doesn't get a
+          # full integration run. The parser is backend-agnostic and the
+          # cross_validate_backends unit test verifies all compiled transpose
+          # backends produce identical output.
+
+          # x86_64: exercises AVX2
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+
+          # aarch64: exercises NEON
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+
+    runs-on: ${{ matrix.os }}
+    name: test (${{ matrix.target }})
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1.15.3
+
+      - run: cargo test --all-features
+      - run: cargo test --all-features --release
+
