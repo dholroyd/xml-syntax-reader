@@ -1,3 +1,10 @@
+// Scalar is the fallback on x86/x86_64 (when no SIMD detected) and is used
+// as the reference implementation in cross_validate_backends tests on all
+// architectures.
+#[cfg(any(
+    not(target_arch = "aarch64"),
+    test,
+))]
 pub mod scalar;
 
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
@@ -58,12 +65,11 @@ pub fn select_transpose() -> TransposeFn {
         }
     }
 
+    // NEON is always available on aarch64; other architectures fall back to scalar.
     #[cfg(target_arch = "aarch64")]
-    {
-        // NEON is always available on aarch64
-        return neon::transpose_64;
-    }
+    return neon::transpose_64;
 
+    #[cfg(not(target_arch = "aarch64"))]
     scalar::transpose_64
 }
 
