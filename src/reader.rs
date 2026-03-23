@@ -3,7 +3,7 @@ use crate::classify::{self, CharClassMasks};
 use crate::state::{DoctypeSubState, ParserState, QuoteStyle};
 #[cfg(feature = "dtd")]
 use crate::state::{DtdDeclContext, DtdDeclKind, DtdPhase};
-use crate::types::{is_xml_whitespace, EntityKind, Error, ErrorKind, ParseError, Span};
+use crate::types::{is_xml_whitespace, EntityKind, Error, ErrorKind, ParseError, QName, Span};
 use crate::visitor::Visitor;
 
 /// Maximum allowed length (in bytes) for XML names: element names, attribute
@@ -245,7 +245,7 @@ impl Reader {
             stream_offset + name_start as u64,
             stream_offset + name_end as u64,
         );
-        visitor.end_tag(name, span).map_err(ParseError::Visitor)?;
+        visitor.end_tag(make_qname(name, span)).map_err(ParseError::Visitor)?;
         Ok(Some(name_end + 1))
     }
 
@@ -278,7 +278,7 @@ impl Reader {
                 stream_offset + name_start as u64,
                 stream_offset + name_end as u64,
             );
-            visitor.start_tag_open(name, name_span).map_err(ParseError::Visitor)?;
+            visitor.start_tag_open(make_qname(name, name_span)).map_err(ParseError::Visitor)?;
             let close_span = Span::new(
                 stream_offset + name_end as u64,
                 stream_offset + name_end as u64 + 1,
@@ -296,7 +296,7 @@ impl Reader {
                 stream_offset + name_start as u64,
                 stream_offset + name_end as u64,
             );
-            visitor.start_tag_open(name, name_span).map_err(ParseError::Visitor)?;
+            visitor.start_tag_open(make_qname(name, name_span)).map_err(ParseError::Visitor)?;
             let close_span = Span::new(
                 stream_offset + name_end as u64,
                 stream_offset + gt_pos as u64 + 1,
@@ -728,7 +728,7 @@ impl Reader {
                         stream_offset + abs as u64,
                     );
                     visitor
-                        .start_tag_open(name, name_span)
+                        .start_tag_open(make_qname(name, name_span))
                         .map_err(ParseError::Visitor)?;
                     self.markup_stream_offset = Some(stream_offset + self.markup_start.unwrap() as u64);
                     self.markup_start = None;
@@ -832,7 +832,7 @@ impl Reader {
                         stream_offset + abs as u64,
                     );
                     visitor
-                        .attribute_name(name, name_span)
+                        .attribute_name(make_qname(name, name_span))
                         .map_err(ParseError::Visitor)?;
                     self.markup_start = None;
 
@@ -969,7 +969,7 @@ impl Reader {
                         stream_offset + abs as u64,
                     );
                     visitor
-                        .end_tag(name, name_span)
+                        .end_tag(make_qname(name, name_span))
                         .map_err(ParseError::Visitor)?;
 
                     let byte = buf[abs];
@@ -3807,6 +3807,13 @@ fn find_non_whitespace(
     block_len: usize,
 ) -> Option<(usize, usize)> {
     find_name_end(!whitespace_mask, pos, block_offset, block_len)
+}
+
+/// Build a `QName` from a raw name slice and span by locating the first `:`.
+#[inline]
+fn make_qname(raw: &[u8], span: Span) -> QName<'_> {
+    let colon_pos = memchr::memchr(b':', raw).map(|p| p as u16);
+    QName::new(raw, colon_pos, span)
 }
 
 /// Check if a byte can start an XML name.

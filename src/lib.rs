@@ -12,13 +12,13 @@
 //! Implement [`Visitor`] to receive events, then feed input to a [`Reader`]:
 //!
 //! ```
-//! use xml_syntax_reader::{Reader, Visitor, Span};
+//! use xml_syntax_reader::{Reader, Visitor, QName};
 //!
 //! struct Print;
 //! impl Visitor for Print {
 //!     type Error = std::convert::Infallible;
-//!     fn start_tag_open(&mut self, name: &[u8], _: Span) -> Result<(), Self::Error> {
-//!         println!("element: {}", String::from_utf8_lossy(name));
+//!     fn start_tag_open(&mut self, name: QName<'_>) -> Result<(), Self::Error> {
+//!         println!("element: {}", String::from_utf8_lossy(&name));
 //!         Ok(())
 //!     }
 //! }
@@ -79,7 +79,7 @@ mod encoding;
 
 mod bitstream;
 
-pub use types::{DeclaredEncoding, Encoding, EntityKind, Error, ErrorKind, ParseError, Span};
+pub use types::{DeclaredEncoding, Encoding, EntityKind, Error, ErrorKind, ParseError, QName, Span};
 pub use visitor::Visitor;
 pub use reader::Reader;
 #[cfg(feature = "std")]

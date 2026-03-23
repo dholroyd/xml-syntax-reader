@@ -1,4 +1,4 @@
-use xml_syntax_reader::{ErrorKind, ParseError, Span, Visitor};
+use xml_syntax_reader::{ErrorKind, ParseError, QName, Span, Visitor};
 use xml_syntax_reader::Reader;
 
 /// A recording visitor that logs all events as strings for test assertions.
@@ -10,20 +10,22 @@ struct Recorder {
 impl Visitor for Recorder {
     type Error = std::convert::Infallible;
 
-    fn start_tag_open(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
+    fn start_tag_open(&mut self, name: QName<'_>) -> Result<(), Self::Error> {
+        let span = name.span();
         self.events.push(format!(
             "StartTagOpen({}, {}..{})",
-            String::from_utf8_lossy(name),
+            String::from_utf8_lossy(&name),
             span.start,
             span.end,
         ));
         Ok(())
     }
 
-    fn attribute_name(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
+    fn attribute_name(&mut self, name: QName<'_>) -> Result<(), Self::Error> {
+        let span = name.span();
         self.events.push(format!(
             "AttrName({}, {}..{})",
-            String::from_utf8_lossy(name),
+            String::from_utf8_lossy(&name),
             span.start,
             span.end,
         ));
@@ -77,10 +79,11 @@ impl Visitor for Recorder {
         Ok(())
     }
 
-    fn end_tag(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
+    fn end_tag(&mut self, name: QName<'_>) -> Result<(), Self::Error> {
+        let span = name.span();
         self.events.push(format!(
             "EndTag({}, {}..{})",
-            String::from_utf8_lossy(name),
+            String::from_utf8_lossy(&name),
             span.start,
             span.end,
         ));

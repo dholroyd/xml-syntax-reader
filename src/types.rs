@@ -7,6 +7,97 @@ pub enum EntityKind {
     Parameter,
 }
 
+/// A qualified name from the XML source, providing zero-copy access to both
+/// the full raw name and its prefix/local-name components, along with the
+/// byte span in the input stream.
+///
+/// The underlying `&[u8]` slice points directly into the caller's buffer.
+/// For unprefixed names like `div`, [`prefix()`](Self::prefix) returns `None`
+/// and [`local_name()`](Self::local_name) returns the full name.
+/// For prefixed names like `svg:rect`, `prefix()` returns `Some(b"svg")`
+/// and `local_name()` returns `b"rect"`.
+///
+/// `QName` implements `Deref<Target = [u8]>`, so it can be used anywhere
+/// a `&[u8]` is expected (e.g. comparison, hashing, printing).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct QName<'a> {
+    raw: &'a [u8],
+    colon_pos: Option<u16>,
+    span: Span,
+}
+
+impl<'a> QName<'a> {
+    /// Construct a `QName` from a raw name slice, optional colon position,
+    /// and byte span in the input stream.
+    #[inline]
+    pub fn new(raw: &'a [u8], colon_pos: Option<u16>, span: Span) -> Self {
+        Self { raw, colon_pos, span }
+    }
+
+    /// The full raw name as it appears in the source (e.g. `b"svg:rect"` or `b"div"`).
+    #[inline]
+    pub fn as_bytes(&self) -> &'a [u8] {
+        self.raw
+    }
+
+    /// The byte span of the full name in the input stream.
+    #[inline]
+    pub fn span(&self) -> Span {
+        self.span
+    }
+
+    /// The namespace prefix, if present.
+    ///
+    /// Returns `Some(b"svg")` for `svg:rect`, `None` for `div`.
+    #[inline]
+    pub fn prefix(&self) -> Option<&'a [u8]> {
+        self.colon_pos.map(|pos| &self.raw[..pos as usize])
+    }
+
+    /// The byte span of the prefix in the input stream, if present.
+    #[inline]
+    pub fn prefix_span(&self) -> Option<Span> {
+        self.colon_pos.map(|pos| Span::new(self.span.start, self.span.start + pos as u64))
+    }
+
+    /// The local name after the prefix and colon.
+    ///
+    /// Returns `b"rect"` for `svg:rect`, `b"div"` for `div`.
+    #[inline]
+    pub fn local_name(&self) -> &'a [u8] {
+        match self.colon_pos {
+            Some(pos) => &self.raw[pos as usize + 1..],
+            None => self.raw,
+        }
+    }
+
+    /// The byte span of the local name in the input stream.
+    ///
+    /// For prefixed names, this starts after the colon.
+    /// For unprefixed names, this is the same as [`span()`](Self::span).
+    #[inline]
+    pub fn local_name_span(&self) -> Span {
+        match self.colon_pos {
+            Some(pos) => Span::new(self.span.start + pos as u64 + 1, self.span.end),
+            None => self.span,
+        }
+    }
+}
+
+impl<'a> core::ops::Deref for QName<'a> {
+    type Target = [u8];
+    #[inline]
+    fn deref(&self) -> &[u8] {
+        self.raw
+    }
+}
+
+impl core::fmt::Debug for QName<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "QName(\"{}\")", self.raw.escape_ascii())
+    }
+}
+
 /// Absolute byte range in the input stream.
 /// `start` is inclusive, `end` is exclusive: `[start, end)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

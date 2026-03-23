@@ -1,4 +1,4 @@
-use crate::types::{EntityKind, Span};
+use crate::types::{EntityKind, QName, Span};
 
 /// Trait for receiving fine-grained XML parsing events.
 ///
@@ -195,15 +195,19 @@ pub trait Visitor {
     // --- Element events ---
 
     /// Start tag opened: `<name`.
-    /// `name` is the element name (may include a namespace prefix and `:`).
-    fn start_tag_open(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
-        let _ = (name, span);
+    /// `name` is the element name, with optional namespace prefix accessible
+    /// via [`QName::prefix()`] and [`QName::local_name()`].
+    /// The byte span is available via [`QName::span()`].
+    fn start_tag_open(&mut self, name: QName<'_>) -> Result<(), Self::Error> {
+        let _ = name;
         Ok(())
     }
 
-    /// Attribute name within a start tag.
-    fn attribute_name(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
-        let _ = (name, span);
+    /// Attribute name within a start tag, with optional namespace prefix
+    /// accessible via [`QName::prefix()`] and [`QName::local_name()`].
+    /// The byte span is available via [`QName::span()`].
+    fn attribute_name(&mut self, name: QName<'_>) -> Result<(), Self::Error> {
+        let _ = name;
         Ok(())
     }
 
@@ -252,9 +256,11 @@ pub trait Visitor {
     }
 
     /// End tag: `</name>`.
-    /// `name` is the element name (may include a namespace prefix and `:`).
-    fn end_tag(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
-        let _ = (name, span);
+    /// `name` is the element name, with optional namespace prefix accessible
+    /// via [`QName::prefix()`] and [`QName::local_name()`].
+    /// The byte span is available via [`QName::span()`].
+    fn end_tag(&mut self, name: QName<'_>) -> Result<(), Self::Error> {
+        let _ = name;
         Ok(())
     }
 
