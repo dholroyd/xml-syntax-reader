@@ -1926,7 +1926,7 @@ fn split_error_triple_dash_in_comment() {
 fn error_empty_entity_ref() {
     assert_eq!(
         expect_xml_error(b"<r>&;</r>"),
-        ErrorKind::UnexpectedByte(b';'),
+        ErrorKind::ExpectedName(b';'),
     );
 }
 
@@ -1941,7 +1941,7 @@ fn split_error_empty_entity_ref() {
 fn error_entity_ref_starts_with_digit() {
     assert_eq!(
         expect_xml_error(b"<r>&1foo;</r>"),
-        ErrorKind::UnexpectedByte(b'1'),
+        ErrorKind::ExpectedName(b'1'),
     );
 }
 
@@ -1949,7 +1949,7 @@ fn error_entity_ref_starts_with_digit() {
 fn error_entity_ref_contains_space() {
     assert_eq!(
         expect_xml_error(b"<r>&fo o;</r>"),
-        ErrorKind::UnexpectedByte(b' '),
+        ErrorKind::ExpectedName(b' '),
     );
 }
 
@@ -2374,7 +2374,7 @@ fn split_error_doctype_name_too_long() {
 fn error_doctype_nested_bracket() {
     // `[` inside the internal subset is not valid in well-formed XML
     let doc = b"<!DOCTYPE html [[]>";
-    assert_eq!(expect_xml_error(doc), ErrorKind::UnexpectedByte(b'['));
+    assert_eq!(expect_xml_error(doc), ErrorKind::ExpectedKeyword(b'['));
 }
 
 #[test]
@@ -2897,7 +2897,7 @@ mod dtd_tests {
         // bare `@` is not valid in internal subset
         assert_eq!(
             expect_xml_error(b"<!DOCTYPE r [@]><r/>"),
-            ErrorKind::UnexpectedByte(b'@'),
+            ErrorKind::ExpectedName(b'@'),
         );
     }
 

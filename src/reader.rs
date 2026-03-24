@@ -395,7 +395,7 @@ impl Reader {
                 Ok(block_rel_pos + 2)
             } else {
                 Err(ParseError::Xml(Error {
-                    kind: ErrorKind::UnexpectedByte(buf[gt_pos]),
+                    kind: ErrorKind::ExpectedClose(buf[gt_pos]),
                     offset: stream_offset + gt_pos as u64,
                 }))
             }
@@ -703,7 +703,7 @@ impl Reader {
                         }
                         _ => {
                             return Err(ParseError::Xml(Error {
-                                kind: ErrorKind::UnexpectedByte(byte),
+                                kind: ErrorKind::ExpectedName(byte),
                                 offset: stream_offset + abs as u64,
                             }));
                         }
@@ -786,7 +786,7 @@ impl Reader {
                         }
                         _ => {
                             return Err(ParseError::Xml(Error {
-                                kind: ErrorKind::UnexpectedByte(byte),
+                                kind: ErrorKind::ExpectedName(byte),
                                 offset: stream_offset + abs as u64,
                             }));
                         }
@@ -808,7 +808,7 @@ impl Reader {
                         pos += 1;
                     } else {
                         return Err(ParseError::Xml(Error {
-                            kind: ErrorKind::UnexpectedByte(byte),
+                            kind: ErrorKind::ExpectedClose(byte),
                             offset: stream_offset + abs as u64,
                         }));
                     }
@@ -859,7 +859,7 @@ impl Reader {
                         pos = next + 1;
                     } else {
                         return Err(ParseError::Xml(Error {
-                            kind: ErrorKind::UnexpectedByte(byte),
+                            kind: ErrorKind::ExpectedEquals(byte),
                             offset: stream_offset + abs as u64,
                         }));
                     }
@@ -880,7 +880,7 @@ impl Reader {
                         pos += 1;
                     } else {
                         return Err(ParseError::Xml(Error {
-                            kind: ErrorKind::UnexpectedByte(byte),
+                            kind: ErrorKind::ExpectedQuote(byte),
                             offset: stream_offset + abs as u64,
                         }));
                     }
@@ -926,7 +926,7 @@ impl Reader {
                         pos = next + 1;
                     } else if byte == b'<' {
                         return Err(ParseError::Xml(Error {
-                            kind: ErrorKind::UnexpectedByte(byte),
+                            kind: ErrorKind::ExpectedQuote(byte),
                             offset: stream_offset + abs as u64,
                         }));
                     } else {
@@ -995,7 +995,7 @@ impl Reader {
                         pos = next + 1;
                     } else {
                         return Err(ParseError::Xml(Error {
-                            kind: ErrorKind::UnexpectedByte(byte),
+                            kind: ErrorKind::ExpectedClose(byte),
                             offset: stream_offset + abs as u64,
                         }));
                     }
@@ -1021,7 +1021,7 @@ impl Reader {
                         }
                         _ => {
                             return Err(ParseError::Xml(Error {
-                                kind: ErrorKind::UnexpectedByte(byte),
+                                kind: ErrorKind::ExpectedKeyword(byte),
                                 offset: stream_offset + abs as u64,
                             }));
                         }
@@ -1049,7 +1049,7 @@ impl Reader {
                         pos += 1;
                     } else {
                         return Err(ParseError::Xml(Error {
-                            kind: ErrorKind::UnexpectedByte(byte),
+                            kind: ErrorKind::ExpectedKeyword(byte),
                             offset: stream_offset + abs as u64,
                         }));
                     }
@@ -1089,7 +1089,7 @@ impl Reader {
                         pos += 1;
                     } else {
                         return Err(ParseError::Xml(Error {
-                            kind: ErrorKind::UnexpectedByte(byte),
+                            kind: ErrorKind::ExpectedKeyword(byte),
                             offset: stream_offset + abs as u64,
                         }));
                     }
@@ -1117,7 +1117,7 @@ impl Reader {
                         pos += 1;
                     } else {
                         return Err(ParseError::Xml(Error {
-                            kind: ErrorKind::UnexpectedByte(byte),
+                            kind: ErrorKind::ExpectedKeyword(byte),
                             offset: stream_offset + abs as u64,
                         }));
                     }
@@ -1309,7 +1309,7 @@ impl Reader {
                             }
                             _ => {
                                 return Err(ParseError::Xml(Error {
-                                    kind: ErrorKind::UnexpectedByte(b),
+                                    kind: ErrorKind::ExpectedName(b),
                                     offset: stream_offset + after as u64,
                                 }));
                             }
@@ -1738,7 +1738,7 @@ impl Reader {
                             // (`<![INCLUDE[…]]>`) appear only in external DTD
                             // subsets, never in internal subsets.
                             return Err(ParseError::Xml(Error {
-                                kind: ErrorKind::UnexpectedByte(b'['),
+                                kind: ErrorKind::ExpectedKeyword(b'['),
                                 offset: stream_offset + abs as u64,
                             }));
                         }
@@ -2233,7 +2233,7 @@ impl Reader {
                     b if is_xml_whitespace(b) => { /* skip */ }
                     _ => {
                         return Err(ParseError::Xml(Error {
-                            kind: ErrorKind::UnexpectedByte(byte),
+                            kind: ErrorKind::ExpectedName(byte),
                             offset: stream_offset + abs as u64,
                         }));
                     }
@@ -2247,7 +2247,7 @@ impl Reader {
                     }
                     _ => {
                         return Err(ParseError::Xml(Error {
-                            kind: ErrorKind::UnexpectedByte(byte),
+                            kind: ErrorKind::ExpectedKeyword(byte),
                             offset: stream_offset + abs as u64,
                         }));
                     }
@@ -2361,7 +2361,7 @@ impl Reader {
                         // End of PI target name
                         if abs == name_start {
                             return Err(ParseError::Xml(Error {
-                                kind: ErrorKind::UnexpectedByte(byte),
+                                kind: ErrorKind::ExpectedName(byte),
                                 offset: stream_offset + abs as u64,
                             }));
                         }
@@ -2388,7 +2388,7 @@ impl Reader {
                         self.content_start = Some(abs + 1);
                     } else if !is_name_byte(byte) {
                         return Err(ParseError::Xml(Error {
-                            kind: ErrorKind::UnexpectedByte(byte),
+                            kind: ErrorKind::ExpectedName(byte),
                             offset: stream_offset + abs as u64,
                         }));
                     }
@@ -2511,7 +2511,7 @@ impl Reader {
                         self.content_start = Some(abs);
                     } else {
                         return Err(ParseError::Xml(Error {
-                            kind: ErrorKind::UnexpectedByte(byte),
+                            kind: ErrorKind::ExpectedKeyword(byte),
                             offset: stream_offset + abs as u64,
                         }));
                     }
@@ -2541,7 +2541,7 @@ impl Reader {
                             }
                         } else {
                             return Err(ParseError::Xml(Error {
-                                kind: ErrorKind::UnexpectedByte(byte),
+                                kind: ErrorKind::ExpectedKeyword(byte),
                                 offset: stream_offset + abs as u64,
                             }));
                         }
@@ -2629,7 +2629,7 @@ impl Reader {
                         b if is_xml_whitespace(b) => { /* skip */ }
                         _ => {
                             return Err(ParseError::Xml(Error {
-                                kind: ErrorKind::UnexpectedByte(byte),
+                                kind: ErrorKind::ExpectedClose(byte),
                                 offset: stream_offset + abs as u64,
                             }));
                         }
@@ -2733,7 +2733,7 @@ impl Reader {
                         }
                         _ => {
                             return Err(ParseError::Xml(Error {
-                                kind: ErrorKind::UnexpectedByte(byte),
+                                kind: ErrorKind::ExpectedQuote(byte),
                                 offset: stream_offset + abs as u64,
                             }));
                         }
@@ -2871,7 +2871,7 @@ impl Reader {
                         b if is_xml_whitespace(b) => { /* skip */ }
                         _ => {
                             return Err(ParseError::Xml(Error {
-                                kind: ErrorKind::UnexpectedByte(byte),
+                                kind: ErrorKind::ExpectedClose(byte),
                                 offset: stream_offset + abs as u64,
                             }));
                         }
@@ -2889,7 +2889,7 @@ impl Reader {
                             }
                         } else {
                             return Err(ParseError::Xml(Error {
-                                kind: ErrorKind::UnexpectedByte(byte),
+                                kind: ErrorKind::ExpectedKeyword(byte),
                                 offset: stream_offset + abs as u64,
                             }));
                         }
@@ -2941,7 +2941,7 @@ impl Reader {
                         b if is_xml_whitespace(b) => { /* skip */ }
                         _ => {
                             return Err(ParseError::Xml(Error {
-                                kind: ErrorKind::UnexpectedByte(byte),
+                                kind: ErrorKind::ExpectedClose(byte),
                                 offset: stream_offset + abs as u64,
                             }));
                         }
@@ -2961,7 +2961,7 @@ impl Reader {
                             }
                         } else {
                             return Err(ParseError::Xml(Error {
-                                kind: ErrorKind::UnexpectedByte(byte),
+                                kind: ErrorKind::ExpectedKeyword(byte),
                                 offset: stream_offset + abs as u64,
                             }));
                         }
@@ -2979,7 +2979,7 @@ impl Reader {
                             }
                         } else {
                             return Err(ParseError::Xml(Error {
-                                kind: ErrorKind::UnexpectedByte(byte),
+                                kind: ErrorKind::ExpectedKeyword(byte),
                                 offset: stream_offset + abs as u64,
                             }));
                         }
@@ -2992,7 +2992,7 @@ impl Reader {
                         self.dtd_phase = DtdPhase::ExternalIdSystemLit { ctx, quote, literal_start: abs + 1 };
                     } else {
                         return Err(ParseError::Xml(Error {
-                            kind: ErrorKind::UnexpectedByte(byte),
+                            kind: ErrorKind::ExpectedQuote(byte),
                             offset: stream_offset + abs as u64,
                         }));
                     }
@@ -3038,7 +3038,7 @@ impl Reader {
                         self.dtd_phase = DtdPhase::ExternalIdPublicLit { ctx, quote, literal_start: abs + 1 };
                     } else {
                         return Err(ParseError::Xml(Error {
-                            kind: ErrorKind::UnexpectedByte(byte),
+                            kind: ErrorKind::ExpectedQuote(byte),
                             offset: stream_offset + abs as u64,
                         }));
                     }
@@ -3090,14 +3090,14 @@ impl Reader {
                             }
                             _ => {
                                 return Err(ParseError::Xml(Error {
-                                    kind: ErrorKind::UnexpectedByte(byte),
+                                    kind: ErrorKind::ExpectedQuote(byte),
                                     offset: stream_offset + abs as u64,
                                 }));
                             }
                         }
                     } else {
                         return Err(ParseError::Xml(Error {
-                            kind: ErrorKind::UnexpectedByte(byte),
+                            kind: ErrorKind::ExpectedQuote(byte),
                             offset: stream_offset + abs as u64,
                         }));
                     }
@@ -3146,7 +3146,7 @@ impl Reader {
                         self.dtd_phase = DtdPhase::ExternalIdPublicKw { ctx, matched: 1 };
                     } else {
                         return Err(ParseError::Xml(Error {
-                            kind: ErrorKind::UnexpectedByte(byte),
+                            kind: ErrorKind::ExpectedKeyword(byte),
                             offset: stream_offset + abs as u64,
                         }));
                     }
@@ -3165,7 +3165,7 @@ impl Reader {
                         b if is_xml_whitespace(b) => { /* skip */ }
                         _ => {
                             return Err(ParseError::Xml(Error {
-                                kind: ErrorKind::UnexpectedByte(byte),
+                                kind: ErrorKind::ExpectedClose(byte),
                                 offset: stream_offset + abs as u64,
                             }));
                         }
@@ -3219,7 +3219,7 @@ impl Reader {
                         self.dtd_phase = DtdPhase::AttlistAttrName { name_start: abs };
                     } else {
                         return Err(ParseError::Xml(Error {
-                            kind: ErrorKind::UnexpectedByte(byte),
+                            kind: ErrorKind::ExpectedName(byte),
                             offset: stream_offset + abs as u64,
                         }));
                     }
@@ -3258,7 +3258,7 @@ impl Reader {
                         self.dtd_phase = DtdPhase::AttlistTypeKeyword { start: abs };
                     } else {
                         return Err(ParseError::Xml(Error {
-                            kind: ErrorKind::UnexpectedByte(byte),
+                            kind: ErrorKind::ExpectedKeyword(byte),
                             offset: stream_offset + abs as u64,
                         }));
                     }
@@ -3292,7 +3292,7 @@ impl Reader {
                         self.dtd_phase = DtdPhase::AttlistTypeEnum { paren_depth: 1 };
                     } else {
                         return Err(ParseError::Xml(Error {
-                            kind: ErrorKind::UnexpectedByte(byte),
+                            kind: ErrorKind::ExpectedKeyword(byte),
                             offset: stream_offset + abs as u64,
                         }));
                     }
@@ -3341,7 +3341,7 @@ impl Reader {
                         self.dtd_phase = DtdPhase::AttlistDefaultValue { quote };
                     } else {
                         return Err(ParseError::Xml(Error {
-                            kind: ErrorKind::UnexpectedByte(byte),
+                            kind: ErrorKind::ExpectedQuote(byte),
                             offset: stream_offset + abs as u64,
                         }));
                     }
@@ -3371,7 +3371,7 @@ impl Reader {
                             }
                             _ => {
                                 return Err(ParseError::Xml(Error {
-                                    kind: ErrorKind::UnexpectedByte(byte),
+                                    kind: ErrorKind::ExpectedKeyword(byte),
                                     offset: stream_offset + start as u64,
                                 }));
                             }
@@ -3392,7 +3392,7 @@ impl Reader {
                         self.dtd_phase = DtdPhase::AttlistDefaultValue { quote };
                     } else {
                         return Err(ParseError::Xml(Error {
-                            kind: ErrorKind::UnexpectedByte(byte),
+                            kind: ErrorKind::ExpectedQuote(byte),
                             offset: stream_offset + abs as u64,
                         }));
                     }
@@ -3514,7 +3514,7 @@ impl Reader {
                 b if is_xml_whitespace(b) => { /* skip */ }
                 _ => {
                     return Err(ParseError::Xml(Error {
-                        kind: ErrorKind::UnexpectedByte(byte),
+                        kind: ErrorKind::ExpectedClose(byte),
                         offset: stream_offset + abs as u64,
                     }));
                 }
@@ -3609,7 +3609,7 @@ fn validate_name<'a, E>(
 ) -> Result<&'a [u8], ParseError<E>> {
     if name_start == name_end {
         return Err(ParseError::Xml(Error {
-            kind: ErrorKind::UnexpectedByte(buf[name_end]),
+            kind: ErrorKind::ExpectedName(buf[name_end]),
             offset: stream_offset + name_end as u64,
         }));
     }
@@ -3663,14 +3663,14 @@ fn find_and_validate_entity_name<'a, E>(
     let name = validate_name(buf, name_start, semi_abs, stream_offset)?;
     if !is_name_start_byte(name[0]) {
         return Err(ParseError::Xml(Error {
-            kind: ErrorKind::UnexpectedByte(name[0]),
+            kind: ErrorKind::ExpectedName(name[0]),
             offset: stream_offset + name_start as u64,
         }));
     }
     for (i, &b) in name[1..].iter().enumerate() {
         if !is_name_byte(b) {
             return Err(ParseError::Xml(Error {
-                kind: ErrorKind::UnexpectedByte(b),
+                kind: ErrorKind::ExpectedName(b),
                 offset: stream_offset + name_start as u64 + 1 + i as u64,
             }));
         }
@@ -3756,13 +3756,13 @@ fn check_ref_name_byte<E>(
 ) -> Result<(), ParseError<E>> {
     if abs == name_start && !is_name_start_byte(byte) {
         return Err(ParseError::Xml(Error {
-            kind: ErrorKind::UnexpectedByte(byte),
+            kind: ErrorKind::ExpectedName(byte),
             offset: stream_offset + abs as u64,
         }));
     }
     if abs > name_start && !is_name_byte(byte) {
         return Err(ParseError::Xml(Error {
-            kind: ErrorKind::UnexpectedByte(byte),
+            kind: ErrorKind::ExpectedName(byte),
             offset: stream_offset + abs as u64,
         }));
     }

@@ -141,8 +141,18 @@ impl core::error::Error for Error {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorKind {
-    /// Unexpected byte encountered.
-    UnexpectedByte(u8),
+    /// Expected an element or attribute name, but found a byte that is not a
+    /// valid name-start character.
+    ExpectedName(u8),
+    /// Expected `=` between attribute name and value.
+    ExpectedEquals(u8),
+    /// Expected a quote character (`"` or `'`) to open an attribute value.
+    ExpectedQuote(u8),
+    /// Expected `>` to close a tag (e.g. after `/>`, end-tag name, or `?` in PI).
+    ExpectedClose(u8),
+    /// Expected a specific keyword character (e.g. in `DOCTYPE`, `CDATA`,
+    /// `NDATA`, `SYSTEM`, `PUBLIC`, `FIXED`, `<!--`, etc.) but found another byte.
+    ExpectedKeyword(u8),
     /// Unexpected end of input within a construct.
     UnexpectedEof,
     /// Invalid character reference.
@@ -180,7 +190,11 @@ pub enum ErrorKind {
 impl core::fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            ErrorKind::UnexpectedByte(b) => write!(f, "unexpected byte 0x{b:02X}"),
+            ErrorKind::ExpectedName(b) => write!(f, "expected name, found 0x{b:02X}"),
+            ErrorKind::ExpectedEquals(b) => write!(f, "expected '=', found 0x{b:02X}"),
+            ErrorKind::ExpectedQuote(b) => write!(f, "expected quote, found 0x{b:02X}"),
+            ErrorKind::ExpectedClose(b) => write!(f, "expected '>', found 0x{b:02X}"),
+            ErrorKind::ExpectedKeyword(b) => write!(f, "expected keyword, found 0x{b:02X}"),
             ErrorKind::UnexpectedEof => write!(f, "unexpected end of input"),
             ErrorKind::InvalidCharRef => write!(f, "invalid character reference"),
             ErrorKind::DoubleDashInComment => write!(f, "double-hyphen (--) in comment body"),
