@@ -3,7 +3,9 @@ use crate::classify::{self, CharClassMasks};
 use crate::state::{DoctypeSubState, ParserState, QuoteStyle};
 #[cfg(feature = "dtd")]
 use crate::state::{DtdDeclContext, DtdDeclKind, DtdPhase};
-use crate::types::{is_xml_whitespace, EntityKind, Error, ErrorKind, ParseError, QName, Span};
+#[cfg(feature = "dtd")]
+use crate::types::EntityKind;
+use crate::types::{is_xml_whitespace, Error, ErrorKind, ParseError, QName, Span};
 use crate::visitor::Visitor;
 
 /// Maximum allowed length (in bytes) for XML names: element names, attribute
@@ -70,6 +72,12 @@ pub struct Reader {
     /// DTD internal subset tokenizer phase.
     #[cfg(feature = "dtd")]
     dtd_phase: DtdPhase,
+}
+
+impl Default for Reader {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Reader {
@@ -360,8 +368,8 @@ impl Reader {
         stream_offset: u64,
         visitor: &mut V,
     ) -> Result<(), ParseError<V::Error>> {
-        if let Some(text_start) = self.text_start.take() {
-            if text_start < end_pos {
+        if let Some(text_start) = self.text_start.take()
+            && text_start < end_pos {
                 let span = Span::new(
                     stream_offset + text_start as u64,
                     stream_offset + end_pos as u64,
@@ -370,7 +378,6 @@ impl Reader {
                     .characters(&buf[text_start..end_pos], span)
                     .map_err(ParseError::Visitor)?;
             }
-        }
         Ok(())
     }
 
@@ -538,11 +545,7 @@ impl Reader {
             let (bp, block_len) = bitstream::transpose_block(self.transpose, buf, block_offset);
             let masks = classify::classify(&bp);
 
-            let start_pos = if block_offset <= self.resume_pos {
-                self.resume_pos - block_offset
-            } else {
-                0
-            };
+            let start_pos = self.resume_pos.saturating_sub(block_offset);
 
             let final_buf_pos =
                 self.process_block(buf, block_offset, block_len, start_pos, &masks, stream_offset, visitor)?;
@@ -1304,8 +1307,8 @@ impl Reader {
             match byte {
                 b'<' => {
                     self.content_bracket_count = 0;
-                    if let Some(text_start) = self.text_start.take() {
-                        if text_start < abs {
+                    if let Some(text_start) = self.text_start.take()
+                        && text_start < abs {
                             let span = Span::new(
                                 stream_offset + text_start as u64,
                                 stream_offset + abs as u64,
@@ -1314,7 +1317,6 @@ impl Reader {
                                 .characters(&buf[text_start..abs], span)
                                 .map_err(ParseError::Visitor)?;
                         }
-                    }
                     self.markup_start = Some(abs);
 
                     // Peek at the byte after '<' to skip the AfterLt dispatch.
@@ -1358,8 +1360,8 @@ impl Reader {
                 }
                 b'&' => {
                     self.content_bracket_count = 0;
-                    if let Some(text_start) = self.text_start.take() {
-                        if text_start < abs {
+                    if let Some(text_start) = self.text_start.take()
+                        && text_start < abs {
                             let span = Span::new(
                                 stream_offset + text_start as u64,
                                 stream_offset + abs as u64,
@@ -1368,7 +1370,6 @@ impl Reader {
                                 .characters(&buf[text_start..abs], span)
                                 .map_err(ParseError::Visitor)?;
                         }
-                    }
                     self.state = ParserState::EntityRef {
                         name_start: abs + 1,
                     };
@@ -1500,7 +1501,7 @@ impl Reader {
             }
 
             // Found a dash - start counting
-            pos = pos + next;
+            pos += next;
             dash_count = 1;
             pos += 1;
             // Loop back to handle consecutive dashes via byte-at-a-time
@@ -1583,7 +1584,7 @@ impl Reader {
             }
 
             // Found a ']' - start counting
-            pos = pos + next;
+            pos += next;
             bracket_count = 1;
             pos += 1;
         }
@@ -3637,12 +3638,12 @@ fn check_name_length<E>(
 ///
 /// Returns the name slice on success.
 #[inline]
-fn validate_name<'a, E>(
-    buf: &'a [u8],
+fn validate_name<E>(
+    buf: &[u8],
     name_start: usize,
     name_end: usize,
     stream_offset: u64,
-) -> Result<&'a [u8], ParseError<E>> {
+) -> Result<&[u8], ParseError<E>> {
     if name_start == name_end {
         return Err(ParseError::Xml(Error {
             kind: ErrorKind::ExpectedName(buf[name_end]),
@@ -3664,15 +3665,15 @@ fn validate_name<'a, E>(
 /// `Ok(None)` if the semicolon is not in this block (caller should advance to block_len),
 /// or `Err` if the name is invalid or too long.
 #[inline]
-fn find_and_validate_entity_name<'a, E>(
-    buf: &'a [u8],
+fn find_and_validate_entity_name<E>(
+    buf: &[u8],
     block_offset: usize,
     block_len: usize,
     pos: usize,
     semicolon_mask: u64,
     stream_offset: u64,
     name_start: usize,
-) -> Result<Option<(&'a [u8], Span, usize)>, ParseError<E>> {
+) -> Result<Option<(&[u8], Span, usize)>, ParseError<E>> {
     let shifted = semicolon_mask >> pos;
     if shifted == 0 {
         if block_offset + block_len - name_start > MAX_NAME_LENGTH {
@@ -3725,15 +3726,15 @@ fn find_and_validate_entity_name<'a, E>(
 /// `Ok(None)` if the semicolon is not in this block (caller should advance to block_len),
 /// or `Err` if the value is invalid or too long.
 #[inline]
-fn find_and_validate_char_ref<'a, E>(
-    buf: &'a [u8],
+fn find_and_validate_char_ref<E>(
+    buf: &[u8],
     block_offset: usize,
     block_len: usize,
     pos: usize,
     semicolon_mask: u64,
     stream_offset: u64,
     value_start: usize,
-) -> Result<Option<(&'a [u8], Span, usize)>, ParseError<E>> {
+) -> Result<Option<(&[u8], Span, usize)>, ParseError<E>> {
     let shifted = semicolon_mask >> pos;
     if shifted == 0 {
         if block_offset + block_len - value_start > MAX_CHAR_REF_LENGTH {
@@ -3783,6 +3784,7 @@ fn find_and_validate_char_ref<'a, E>(
 /// Validate a single byte during reference name scanning.
 ///
 /// Checks `is_name_start_byte` for the first byte and `is_name_byte` for subsequent bytes.
+#[cfg(feature = "dtd")]
 #[inline]
 fn check_ref_name_byte<E>(
     byte: u8,
@@ -3809,12 +3811,12 @@ fn check_ref_name_byte<E>(
 ///
 /// Returns the value slice on success.
 #[inline]
-fn validate_char_ref<'a, E>(
-    buf: &'a [u8],
+fn validate_char_ref<E>(
+    buf: &[u8],
     value_start: usize,
     value_end: usize,
     stream_offset: u64,
-) -> Result<&'a [u8], ParseError<E>> {
+) -> Result<&[u8], ParseError<E>> {
     let value = &buf[value_start..value_end];
     if value.is_empty() {
         return Err(ParseError::Xml(Error {
