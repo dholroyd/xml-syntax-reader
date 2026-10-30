@@ -79,6 +79,12 @@ fn count_elements(mut input: impl Read) -> std::io::Result<u64> {
 }
 ```
 
+When `is_final` is `true` and the parse succeeds, the visitor's
+`end_document()` callback is called once, after all other events, so visitors
+can flush buffered state. It is not called after an error or for non-final
+chunks, and a repeated final `parse()` does not call it again (until
+`Reader::reset()`).
+
 ### Buffer size requirements
 
 Because visitor callbacks receive `&[u8]` slices that are zero-copy references

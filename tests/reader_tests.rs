@@ -2969,3 +2969,176 @@ mod dtd_tests {
         verify_all_splits(b"<!DOCTYPE r [] ><r/>");
     }
 }
+
+// --- end_document ---
+
+#[derive(Debug, Default)]
+struct EndRecorder {
+    events: Vec<String>,
+    end_calls: usize,
+    fail_on_tag: bool,
+}
+
+impl Visitor for EndRecorder {
+    type Error = &'static str;
+
+    fn start_tag_open(&mut self, name: QName<'_>) -> Result<(), Self::Error> {
+        self.events.push(format!("Start({})", String::from_utf8_lossy(&name)));
+        if self.fail_on_tag { Err("boom") } else { Ok(()) }
+    }
+
+    fn end_tag(&mut self, name: QName<'_>) -> Result<(), Self::Error> {
+        self.events.push(format!("End({})", String::from_utf8_lossy(&name)));
+        Ok(())
+    }
+
+    fn end_document(&mut self) -> Result<(), Self::Error> {
+        self.end_calls += 1;
+        self.events.push("EndDocument".into());
+        Ok(())
+    }
+}
+
+#[test]
+fn end_document_parse_slice() {
+    let mut r = Reader::new();
+    let mut v = EndRecorder::default();
+    r.parse_slice(b"<a><b/></a>", &mut v).unwrap();
+    assert_eq!(v.end_calls, 1);
+    assert_eq!(v.events.last().unwrap(), "EndDocument");
+    assert_eq!(v.events.iter().filter(|e| *e == "End(a)").count(), 1);
+}
+
+#[test]
+fn end_document_chunked_only_on_final() {
+    let doc = b"<a><b/></a>";
+    let mut r = Reader::new();
+    let mut v = EndRecorder::default();
+    let c1 = r.parse(&doc[..5], 0, false, &mut v).unwrap() as usize;
+    assert_eq!(v.end_calls, 0);
+    let c2 = r.parse(&doc[c1..], c1 as u64, false, &mut v).unwrap() as usize;
+    assert_eq!(v.end_calls, 0);
+    let off = c1 + c2;
+    r.parse(&doc[off..], off as u64, true, &mut v).unwrap();
+    assert_eq!(v.end_calls, 1);
+    assert_eq!(v.events.last().unwrap(), "EndDocument");
+}
+
+#[test]
+fn end_document_not_called_on_syntax_error() {
+    let mut r = Reader::new();
+    let mut v = EndRecorder::default();
+    assert!(r.parse_slice(b"<a><", &mut v).is_err());
+    assert_eq!(v.end_calls, 0);
+    let mut r = Reader::new();
+    let mut v = EndRecorder::default();
+    assert!(r.parse_slice(b"<a b=>", &mut v).is_err());
+    assert_eq!(v.end_calls, 0);
+}
+
+#[test]
+fn end_document_not_called_on_visitor_error() {
+    let mut r = Reader::new();
+    let mut v = EndRecorder { fail_on_tag: true, ..Default::default() };
+    assert!(matches!(
+        r.parse_slice(b"<a/>", &mut v),
+        Err(ParseError::Visitor("boom"))
+    ));
+    assert_eq!(v.end_calls, 0);
+}
+
+#[test]
+fn end_document_error_is_propagated() {
+    struct Failing;
+    impl Visitor for Failing {
+        type Error = &'static str;
+        fn end_document(&mut self) -> Result<(), Self::Error> {
+            Err("end")
+        }
+    }
+    let mut r = Reader::new();
+    assert!(matches!(
+        r.parse_slice(b"<a/>", &mut Failing),
+        Err(ParseError::Visitor("end"))
+    ));
+}
+
+#[test]
+fn end_document_empty_final_buffer() {
+    let doc = b"<a/>";
+    let mut r = Reader::new();
+    let mut v = EndRecorder::default();
+    let c = r.parse(doc, 0, false, &mut v).unwrap();
+    assert_eq!(c as usize, doc.len());
+    assert_eq!(v.end_calls, 0);
+    // Streaming: the last read returned 0 bytes.
+    assert_eq!(r.parse(&[], c, true, &mut v).unwrap(), 0);
+    assert_eq!(v.end_calls, 1);
+    // Empty non-final buffer never triggers it.
+    let mut r = Reader::new();
+    let mut v = EndRecorder::default();
+    r.parse(&[], 0, false, &mut v).unwrap();
+    assert_eq!(v.end_calls, 0);
+}
+
+#[test]
+fn end_document_once_per_document_until_reset() {
+    let mut r = Reader::new();
+    let mut v = EndRecorder::default();
+    r.parse_slice(b"<a/>", &mut v).unwrap();
+    assert_eq!(v.end_calls, 1);
+    r.reset();
+    r.parse_slice(b"<a/>", &mut v).unwrap();
+    assert_eq!(v.end_calls, 2);
+}
+
+#[test]
+#[should_panic(expected = "after the final chunk")]
+fn parse_after_final_panics() {
+    let mut r = Reader::new();
+    let mut v = EndRecorder::default();
+    r.parse_slice(b"<a/>", &mut v).unwrap();
+    let _ = r.parse(b"<!-- x -->", 4, false, &mut v);
+}
+
+#[test]
+#[should_panic(expected = "after the final chunk")]
+fn parse_after_failed_final_panics() {
+    let mut r = Reader::new();
+    let mut v = EndRecorder::default();
+    assert!(r.parse(b"<a><", 0, true, &mut v).is_err());
+    let _ = r.parse(&[], 4, true, &mut v);
+}
+
+#[test]
+#[cfg(feature = "std")]
+fn end_document_parse_read() {
+    for cap in [64, 4096] {
+        let doc = format!("<a>{}</a>", "x".repeat(300));
+        let mut v = EndRecorder::default();
+        xml_syntax_reader::parse_read_with_capacity(doc.as_bytes(), &mut v, cap).unwrap();
+        assert_eq!(v.end_calls, 1, "cap {cap}");
+        assert_eq!(v.events.last().unwrap(), "EndDocument");
+    }
+    // Empty input is a valid (empty) document here.
+    let mut v = EndRecorder::default();
+    xml_syntax_reader::parse_read(&b""[..], &mut v).unwrap();
+    assert_eq!(v.end_calls, 1);
+    // Error: not called.
+    let mut v = EndRecorder::default();
+    assert!(xml_syntax_reader::parse_read(&b"<a><"[..], &mut v).is_err());
+    assert_eq!(v.end_calls, 0);
+}
+
+#[test]
+#[cfg(feature = "std")]
+fn parse_read_buffer_too_small() {
+    let doc = format!("<{}/>", "y".repeat(300));
+    let mut v = EndRecorder::default();
+    let err = xml_syntax_reader::parse_read_with_capacity(doc.as_bytes(), &mut v, 64);
+    assert!(matches!(
+        err,
+        Err(xml_syntax_reader::ReadError::BufferTooSmall { capacity: 64 })
+    ));
+    assert_eq!(v.end_calls, 0);
+}

@@ -189,6 +189,15 @@ use crate::types::{EntityKind, QName, Span};
 ///
 /// For CDATA, comments, PIs, and DOCTYPE, the content callback may fire
 /// more than once when the content spans buffer boundaries.
+///
+/// ## End of document
+///
+/// `end_document` is the last callback for a document. It fires exactly once,
+/// when the final chunk (`is_final = true`) has been parsed successfully and
+/// all other events have been delivered. It does not fire for non-final
+/// chunks, nor if parsing stopped with a syntax error or a visitor error.
+/// No further `parse()` calls are allowed after the final chunk until the
+/// reader is reset.
 pub trait Visitor {
     type Error;
 
@@ -680,6 +689,16 @@ pub trait Visitor {
     /// `name` is the entity name without `%` and `;`.
     fn dtd_pe_reference(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
         let _ = (name, span);
+        Ok(())
+    }
+
+    // --- End of input ---
+
+    /// End of document: the final input has been parsed successfully.
+    /// Called exactly once per document, after every other event, so a
+    /// visitor can flush buffered state. Not called if `parse` returns an
+    /// error, nor for non-final chunks.
+    fn end_document(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
 }

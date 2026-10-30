@@ -47,6 +47,10 @@ pub struct Reader {
     /// Preserved for EOF error reporting after markup_start is cleared.
     markup_stream_offset: Option<u64>,
 
+    /// Whether a final chunk (`is_final = true`) has been passed to `parse()`
+    /// for the current document, successfully or not. Cleared by `reset()`.
+    finished: bool,
+
     /// Whether any markup has completed (set in `finish_markup` / `finish_content_body`).
     /// Used to detect if `<?xml ...?>` is the first construct or appears later.
     had_markup: bool,
@@ -79,6 +83,7 @@ impl Reader {
             content_bracket_count: 0,
             content_start: None,
             markup_stream_offset: None,
+            finished: false,
             had_markup: false,
             in_xml_decl: false,
             xml_decl_buf: [0; 256],
@@ -94,6 +99,7 @@ impl Reader {
         self.finish_content_body();
         self.resume_pos = 0;
         self.content_bracket_count = 0;
+        self.finished = false;
         self.had_markup = false;
         self.in_xml_decl = false;
         self.xml_decl_buf_len = 0;
@@ -437,6 +443,22 @@ impl Reader {
     /// boundary split - only due to genuinely invalid UTF-8 in the source data.
     /// If the trailing bytes are provably invalid UTF-8 (continuation bytes with
     /// no leading byte), `parse()` returns `ErrorKind::InvalidUtf8`.
+    ///
+    /// # End of document
+    ///
+    /// When `is_final` is `true` and parsing completes successfully (including
+    /// the case of an empty `buf` when no construct is left unfinished),
+    /// [`Visitor::end_document`] is called once, after all other events for the
+    /// document have been delivered. It is not called for non-final chunks, nor
+    /// when `parse()` returns an error (whether a syntax error or an error from
+    /// a visitor callback).
+    ///
+    /// # Panics
+    ///
+    /// Panics if called after a call with `is_final = true`, whether that call
+    /// succeeded or returned an error. Call [`reset()`](Self::reset) to start a
+    /// new document. After any error the reader should likewise be reset
+    /// before reuse.
     pub fn parse<V: Visitor>(
         &mut self,
         buf: &[u8],
@@ -444,12 +466,21 @@ impl Reader {
         is_final: bool,
         visitor: &mut V,
     ) -> Result<u64, ParseError<V::Error>> {
+        assert!(
+            !self.finished,
+            "parse() called after the final chunk; call reset() to start a new document"
+        );
+        self.finished = is_final;
+
         if buf.is_empty() {
             if is_final && self.state != ParserState::Content {
                 return Err(ParseError::Xml(Error {
                     kind: ErrorKind::UnexpectedEof,
                     offset: stream_offset,
                 }));
+            }
+            if is_final {
+                visitor.end_document().map_err(ParseError::Visitor)?;
             }
             return Ok(0);
         }
@@ -651,6 +682,11 @@ impl Reader {
             self.state.adjust_positions(consumed);
             #[cfg(feature = "dtd")]
             self.dtd_phase.adjust_positions(consumed);
+        }
+
+        if is_final {
+            debug_assert_eq!(consumed, buf.len(), "final parse left input unconsumed");
+            visitor.end_document().map_err(ParseError::Visitor)?;
         }
 
         Ok(consumed as u64)
@@ -4003,7 +4039,8 @@ const DEFAULT_BUF_SIZE: usize = 8192;
 ///
 /// Returns [`ReadError::Xml`] for XML syntax errors, [`ReadError::Visitor`]
 /// for errors returned by visitor callbacks, or [`ReadError::Io`] for I/O
-/// failures from the reader.
+/// failures from the reader, or [`ReadError::BufferTooSmall`] if a single
+/// construct does not fit in the buffer.
 #[cfg(feature = "std")]
 pub fn parse_read<R: std::io::Read, V: Visitor>(
     reader: R,
@@ -4033,10 +4070,6 @@ pub fn parse_read_with_capacity<R: std::io::Read, V: Visitor>(
         valid += n;
         let is_final = n == 0;
 
-        if valid == 0 {
-            break;
-        }
-
         let consumed = parser
             .parse(&buf[..valid], stream_offset, is_final, visitor)
             .map_err(ReadError::from_parse)? as usize;
@@ -4049,8 +4082,15 @@ pub fn parse_read_with_capacity<R: std::io::Read, V: Visitor>(
         valid = leftover;
         stream_offset += consumed as u64;
 
-        if consumed == 0 && is_final {
+        if is_final {
             break;
+        }
+
+        // A full buffer with nothing consumed means a single construct is
+        // larger than the buffer. Reading into an empty slice would return 0
+        // and be mistaken for EOF.
+        if valid == buf.len() {
+            return Err(ReadError::BufferTooSmall { capacity: buf.len() });
         }
     }
 
@@ -4066,6 +4106,9 @@ pub enum ReadError<E> {
     Visitor(E),
     /// I/O error from the underlying reader.
     Io(std::io::Error),
+    /// A single construct did not fit in the buffer. Use
+    /// [`parse_read_with_capacity`] with a larger `capacity`.
+    BufferTooSmall { capacity: usize },
 }
 
 #[cfg(feature = "std")]
@@ -4085,6 +4128,9 @@ impl<E: core::fmt::Debug> core::fmt::Debug for ReadError<E> {
             ReadError::Xml(e) => write!(f, "ReadError::Xml({e:?})"),
             ReadError::Visitor(e) => write!(f, "ReadError::Visitor({e:?})"),
             ReadError::Io(e) => write!(f, "ReadError::Io({e:?})"),
+            ReadError::BufferTooSmall { capacity } => {
+                write!(f, "ReadError::BufferTooSmall({capacity})")
+            }
         }
     }
 }
@@ -4096,6 +4142,9 @@ impl<E: core::fmt::Display> core::fmt::Display for ReadError<E> {
             ReadError::Xml(e) => write!(f, "XML error: {e}"),
             ReadError::Visitor(e) => write!(f, "visitor error: {e}"),
             ReadError::Io(e) => write!(f, "I/O error: {e}"),
+            ReadError::BufferTooSmall { capacity } => {
+                write!(f, "construct larger than the {capacity}-byte buffer")
+            }
         }
     }
 }
