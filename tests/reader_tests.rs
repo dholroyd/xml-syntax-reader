@@ -1287,6 +1287,29 @@ fn doctype_with_internal_subset() {
 }
 
 #[test]
+#[cfg(not(feature = "dtd"))]
+fn doctype_internal_subset_no_space() {
+    // `[` immediately after the name must open the internal subset (issue #1)
+    // < ! D O C T Y P E   h  t  m  l  [  <  ...
+    // 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+    let events = parse_full(b"<!DOCTYPE html[<!ENTITY foo \"bar\">]>");
+    assert_eq!(
+        events,
+        vec![
+            "DoctypeStart(html, 10..14)",
+            "DoctypeContent([<!ENTITY foo \"bar\">], 14..35)",
+            "DoctypeEnd(35..36)",
+        ]
+    );
+}
+
+#[test]
+#[cfg(not(feature = "dtd"))]
+fn split_doctype_internal_subset_no_space() {
+    verify_all_splits(b"<!DOCTYPE html[<!ENTITY foo \"bar\">]>");
+}
+
+#[test]
 fn split_simple_doctype() {
     verify_all_splits(b"<!DOCTYPE html>");
 }
@@ -2474,6 +2497,25 @@ mod dtd_tests {
         assert_eq!(events[5], "EntityDeclEnd(31..32)");
         assert_eq!(events[6], "SubsetEnd(32..33)");
         assert_eq!(events[7], "DoctypeEnd(33..34)");
+    }
+
+    #[test]
+    fn dtd_internal_subset_no_space() {
+        // `[` immediately after the name must open the internal subset (issue #1)
+        let events = parse_full(b"<!DOCTYPE r[<!ENTITY foo \"bar\">]><r/>");
+        assert_eq!(events[0], "DoctypeStart(r, 10..11)");
+        assert_eq!(events[1], "SubsetStart(11..12)");
+        assert_eq!(events[2], "EntityDeclStart(foo, pe=false, 21..24)");
+        assert_eq!(events[3], "EntityDeclValue(bar, 26..29)");
+        assert_eq!(events[4], "EntityDeclValueEnd(29..30)");
+        assert_eq!(events[5], "EntityDeclEnd(30..31)");
+        assert_eq!(events[6], "SubsetEnd(31..32)");
+        assert_eq!(events[7], "DoctypeEnd(32..33)");
+    }
+
+    #[test]
+    fn split_dtd_internal_subset_no_space() {
+        verify_all_splits(b"<!DOCTYPE r[<!ENTITY foo \"bar\">]><r/>");
     }
 
     #[test]
