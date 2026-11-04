@@ -1605,6 +1605,10 @@ impl Reader {
         name_start: usize,
         visitor: &mut V,
     ) -> Result<usize, ParseError<V::Error>> {
+        // Unlike other names, a DOCTYPE name may be terminated directly by the
+        // `[` opening the internal subset (`<!DOCTYPE foo[...]>`).
+        let name_end_mask = masks.name_end | masks.lbracket;
+
         // Phase 1: require whitespace after DOCTYPE keyword, then find the name start.
         // name_start == usize::MAX means we just matched "DOCTYPE" and need at least
         // one whitespace char. name_start == usize::MAX - 1 means we saw whitespace
@@ -1649,7 +1653,7 @@ impl Reader {
             // Found name start - update state and continue scanning in same call
             self.state = ParserState::DoctypeName { name_start: new_abs };
             // Scan for name end from this position
-            let shifted2 = masks.name_end >> (pos + next);
+            let shifted2 = name_end_mask >> (pos + next);
             if shifted2 == 0 {
                 return Ok(block_len);
             }
@@ -1663,7 +1667,7 @@ impl Reader {
 
         // Phase 2: scan for name end
         let Some((next, end_abs)) =
-            find_name_end(masks.name_end, pos, block_offset, block_len)
+            find_name_end(name_end_mask, pos, block_offset, block_len)
         else {
             check_name_length(block_offset + block_len, name_start, stream_offset)?;
             return Ok(block_len);
@@ -1708,15 +1712,18 @@ impl Reader {
             self.finish_markup();
             Ok(block_rel_pos + 1)
         } else {
-            // Whitespace or '[' - transition to content scanning
+            // Whitespace or '[' - transition to content scanning.  A '[' is left
+            // unconsumed so that DoctypeContent sees it and opens the internal
+            // subset.
             self.markup_stream_offset = Some(stream_offset + self.markup_start.unwrap() as u64);
             self.markup_start = None;
-            self.content_start = Some(end_abs + 1);
+            let consumed = if byte == b'[' { 0 } else { 1 };
+            self.content_start = Some(end_abs + consumed);
             self.state = ParserState::DoctypeContent {
                 depth: 0,
                 sub: DoctypeSubState::Normal,
             };
-            Ok(block_rel_pos + 1)
+            Ok(block_rel_pos + consumed)
         }
     }
 
