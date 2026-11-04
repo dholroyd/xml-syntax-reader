@@ -85,3 +85,8 @@ pub use reader::Reader;
 #[cfg(feature = "std")]
 pub use reader::{parse_read, parse_read_with_capacity, ReadError};
 pub use encoding::{probe_encoding, ProbeResult};
+
+/// Keep README examples in sync with the API
+#[cfg(all(doctest, feature = "std"))]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;

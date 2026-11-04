@@ -7,15 +7,16 @@ This is a *syntax* reader, not a full XML parser. It tokenizes well-formed XML i
 ## Usage
 
 ```rust
-use xml_syntax_reader::{Reader, Visitor, Span};
+use xml_syntax_reader::{QName, Reader, Visitor, Span};
 
 struct MyVisitor;
 
 impl Visitor for MyVisitor {
     type Error = std::convert::Infallible;
 
-    fn start_tag_open(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
-        println!("element: {} at {}..{}", String::from_utf8_lossy(name), span.start, span.end);
+    fn start_tag_open(&mut self, name: QName<'_>) -> Result<(), Self::Error> {
+        let span = name.span();
+        println!("element: {} at {}..{}", String::from_utf8_lossy(&name), span.start, span.end);
         Ok(())
     }
 
@@ -40,13 +41,13 @@ fn main() {
 The reader is designed for streaming use. `parse()` borrows the caller's buffer, processes as much as possible, and returns the number of bytes consumed. The caller shifts unconsumed bytes to the front, appends more data, and calls `parse()` again:
 
 ```rust
-use xml_syntax_reader::{Reader, Visitor, Span};
+use xml_syntax_reader::{QName, Reader, Visitor};
 use std::io::Read;
 
 struct CountVisitor { count: u64 }
 impl Visitor for CountVisitor {
     type Error = std::convert::Infallible;
-    fn start_tag_open(&mut self, _: &[u8], _: Span) -> Result<(), Self::Error> {
+    fn start_tag_open(&mut self, _: QName<'_>) -> Result<(), Self::Error> {
         self.count += 1;
         Ok(())
     }
@@ -77,13 +78,23 @@ fn count_elements(mut input: impl Read) -> std::io::Result<u64> {
     }
     Ok(visitor.count)
 }
+
+assert_eq!(count_elements(&b"<a><b/><c/></a>"[..]).unwrap(), 3);
 ```
 
+### End of document
+
 When `is_final` is `true` and the parse succeeds, the visitor's
-`end_document()` callback is called once, after all other events, so visitors
-can flush buffered state. It is not called after an error or for non-final
-chunks, and a repeated final `parse()` does not call it again (until
-`Reader::reset()`).
+`end_document()` callback is called exactly once, after all other events, so
+visitors can flush buffered state. This includes a final call with an empty
+buffer, as in the loop above when the source hits EOF. `end_document()` is not
+called for non-final chunks, nor when `parse()` returns an error (either a
+syntax error or an error from a visitor callback).
+
+Once `parse()` has been called with `is_final = true`, the document is
+finished: calling `parse()` again **panics**, whether the final call succeeded
+or failed. Call `Reader::reset()` to start a new document. After any error the
+reader should likewise be reset before reuse.
 
 ### Buffer size requirements
 
@@ -101,8 +112,10 @@ name: `<!DOCTYPE` (9 bytes) + whitespace (1) + name (up to 1,000 bytes) +
 delimiter (1) = **1,011 bytes**. If the buffer is too small to hold the
 complete atomic construct, `parse()` will return `consumed == 0` on each call,
 the buffer will fill with unconsumed bytes, and no further progress can be
-made. When `is_final` is then set to `true`, this produces an `UnexpectedEof`
-error.
+made. In a hand-written loop like the one above, a full buffer causes
+`read()` to return 0, which is treated as EOF; the final `parse()` then
+reports an `UnexpectedEof` error. `parse_read` detects this case and returns
+`ReadError::BufferTooSmall` instead.
 
 **Minimum buffer size: 4 KiB (4,096 bytes).** - This is roughly 4× the
 theoretical minimum and provides comfortable headroom. A fixed-size buffer is
@@ -122,15 +135,15 @@ The `Visitor` trait provides callbacks for all XML syntax constructs:
 
 | Callback | Trigger | Data |
 |---|---|---|
-| `start_tag_open` | `<name` | element name |
-| `attribute_name` | attribute name in start tag | attribute name |
+| `start_tag_open` | `<name` | element name (`QName`) |
+| `attribute_name` | attribute name in start tag | attribute name (`QName`) |
 | `attribute_value` | `"value"` or `'value'` | raw value (without quotes) |
 | `attribute_entity_ref` | `&name;` in attribute value | entity name |
 | `attribute_char_ref` | `&#60;` or `&#x3C;` in attribute value | value between `&#` and `;` |
 | `attribute_end` | closing quote of attribute value | |
 | `start_tag_close` | `>` | |
 | `empty_element_end` | `/>` | |
-| `end_tag` | `</name>` | element name |
+| `end_tag` | `</name>` | element name (`QName`) |
 | `characters` | text content | raw text |
 | `entity_ref` | `&name;` | entity name |
 | `char_ref` | `&#60;` or `&#x3C;` | value between `&#` and `;` |
@@ -139,8 +152,11 @@ The `Visitor` trait provides callbacks for all XML syntax constructs:
 | `xml_declaration` | `<?xml ...?>` | version, encoding, standalone |
 | `pi_start` / `pi_content` / `pi_end` | `<?target ...?>` | target name, content |
 | `doctype_start` / `doctype_content` / `doctype_end` | `<!DOCTYPE ...>` | root name, opaque content |
+| `end_document` | successful final `parse()` | |
 
-All `&[u8]` slices are zero-copy references into the caller's buffer. Every event includes a `Span` with absolute byte offsets into the input stream.
+All `&[u8]` slices are zero-copy references into the caller's buffer. Every event except `end_document` includes a `Span` with absolute byte offsets into the input stream.
+
+Element and attribute names are delivered as a `QName`, which derefs to `&[u8]` (the full name) and also provides `prefix()`, `local_name()` and `span()`. For `svg:rect`, `prefix()` is `Some(b"svg")` and `local_name()` is `b"rect"`. The prefix is split off syntactically; it is not resolved to a namespace URI.
 
 Attribute values may be segmented at entity/char-ref boundaries and buffer boundaries - `attribute_value` fires for each text segment, interleaved with `attribute_entity_ref` / `attribute_char_ref` callbacks. Empty segments are omitted, so an attribute whose value is empty or consists entirely of references produces zero `attribute_value` calls.
 
@@ -154,7 +170,11 @@ The parser rejects malformed input with specific error kinds:
 
 | Error | Trigger |
 |---|---|
-| `UnexpectedByte(u8)` | Invalid byte in the current parsing context |
+| `ExpectedName(u8)` | Byte that cannot start an element or attribute name |
+| `ExpectedEquals(u8)` | Missing `=` between attribute name and value |
+| `ExpectedQuote(u8)` | Missing `"` or `'` opening an attribute value |
+| `ExpectedClose(u8)` | Missing `>` closing a tag (e.g. after `/`, an end-tag name, or `?` in a PI) |
+| `ExpectedKeyword(u8)` | Wrong byte inside a keyword such as `DOCTYPE`, `CDATA`, `<!--`, `SYSTEM`, `PUBLIC` |
 | `UnexpectedEof` | Input ends inside an incomplete construct |
 | `CdataEndInContent` | `]]>` in text content |
 | `DoubleDashInComment` | `--` inside a comment body |
@@ -168,30 +188,55 @@ The parser rejects malformed input with specific error kinds:
 | `MalformedXmlDeclaration` | Malformed XML declaration (missing version, bad syntax) |
 | `ReservedPITarget` | PI target matching `xml` (case-insensitive) after document start |
 
-Errors include the absolute byte offset where the problem was detected.
+The `(u8)` payload is the offending byte. Errors include the absolute byte offset where the problem was detected.
 
 ## Convenience Functions
 
-For in-memory documents, `parse_slice` avoids the streaming boilerplate:
+For in-memory documents, `parse_slice` avoids the streaming boilerplate. It
+calls `parse()` once with `is_final = true`, so `end_document()` fires on
+success:
 
 ```rust
+use xml_syntax_reader::{Reader, Visitor};
+
+struct MyVisitor;
+impl Visitor for MyVisitor {
+    type Error = std::convert::Infallible;
+}
+
+let xml = b"<doc/>";
 let mut reader = Reader::new();
-reader.parse_slice(xml, &mut visitor).unwrap();
+reader.parse_slice(xml, &mut MyVisitor).unwrap();
 ```
 
 For `std::io::Read` sources, `parse_read` manages the buffer internally:
 
-```rust
-use xml_syntax_reader::{parse_read, Visitor, Span};
+```rust,no_run
+use xml_syntax_reader::{parse_read, Visitor};
+
+struct MyVisitor;
+impl Visitor for MyVisitor {
+    type Error = std::convert::Infallible;
+}
 
 let file = std::fs::File::open("input.xml").unwrap();
-let mut visitor = MyVisitor;
-parse_read(file, &mut visitor).unwrap();
+parse_read(file, &mut MyVisitor).unwrap();
 ```
+
+`parse_read` always finishes with a final `parse()` at EOF, so input truncated
+inside a construct is reported as `UnexpectedEof` rather than silently
+accepted. Errors are returned as `ReadError`:
+
+| Variant | Meaning |
+|---|---|
+| `ReadError::Xml(Error)` | XML syntax error |
+| `ReadError::Visitor(E)` | Error returned by a visitor callback |
+| `ReadError::Io(std::io::Error)` | I/O error from the underlying reader |
+| `ReadError::BufferTooSmall { capacity }` | A single construct did not fit in the buffer |
 
 `parse_read_with_capacity` allows specifying the buffer size. The capacity is
 clamped to a minimum of 64 bytes, but at least **4 KiB** is recommended to
-avoid stalling on legal XML with long names (see
+avoid `BufferTooSmall` on legal XML with long names (see
 [Buffer size requirements](#buffer-size-requirements)).
 
 ## Encoding Detection
@@ -264,14 +309,15 @@ When enabled, the parser tokenizes declarations inside `<!DOCTYPE name [ ... ]>`
 
 | Declaration | Callbacks |
 |---|---|
+| `<!DOCTYPE>` external ID / subset | `doctype_system_id`, `doctype_public_id`, `doctype_internal_subset_start`, `doctype_internal_subset_end` |
 | `<!ELEMENT>` | `element_decl_start`, `element_decl_empty` / `element_decl_any` / `element_decl_content_spec`, `element_decl_end` |
-| `<!ATTLIST>` | `attlist_decl_start`, `attlist_attr_name`, `attlist_attr_type`, `attlist_attr_required` / `attlist_attr_implied` / `attlist_attr_default_*`, `attlist_decl_end` |
-| `<!ENTITY>` | `entity_decl_start` (with `is_parameter` flag), `entity_decl_value` / `entity_decl_system_id` / `entity_decl_public_id` / `entity_decl_ndata`, `entity_decl_end` |
+| `<!ATTLIST>` | `attlist_decl_start`, `attlist_attr_name`, `attlist_attr_type`, `attlist_attr_required` / `attlist_attr_implied` / (`attlist_attr_default_start`, `attlist_attr_default_value` / `attlist_attr_default_entity_ref` / `attlist_attr_default_char_ref`, `attlist_attr_default_end`), `attlist_decl_end` |
+| `<!ENTITY>` | `entity_decl_start` (with `EntityKind::General` / `EntityKind::Parameter`), then either a value (`entity_decl_value` / `entity_decl_entity_ref` / `entity_decl_char_ref` / `entity_decl_pe_ref`, `entity_decl_value_end`) or an external ID (`entity_decl_system_id` / `entity_decl_public_id`, optional `entity_decl_ndata`), `entity_decl_end` |
 | `<!NOTATION>` | `notation_decl_start`, `notation_decl_system_id` / `notation_decl_public_id`, `notation_decl_end` |
 | `%name;` | `dtd_pe_reference` |
 | Comments / PIs | Same callbacks as outside DTD |
 
-Entity declaration values and ATTLIST default values are streamed with interleaved `entity_ref`, `char_ref`, and `pe_ref` callbacks, just like attribute values in the main document.
+Entity declaration values and ATTLIST default values are streamed as text segments interleaved with their own reference callbacks (`entity_decl_entity_ref` / `entity_decl_char_ref` / `entity_decl_pe_ref`, and `attlist_attr_default_entity_ref` / `attlist_attr_default_char_ref`), just like attribute values in the main document.
 
 ELEMENT content models (e.g. `(a|b,(c,d)*)`) are delivered as raw bytes via `element_decl_content_spec` with parenthesis depth tracked by the parser.
 
@@ -281,6 +327,9 @@ Additional errors with `dtd` enabled:
 
 | Error | Trigger |
 |---|---|
+| `DtdInvalidMarkup` | Unrecognized `<!` construct inside the internal subset |
+| `DtdDeclMissingWhitespace` | Missing whitespace after a declaration keyword (e.g. `<!ELEMENT`) |
+| `DtdDeclMissingName` | Missing or invalid name in a DTD declaration |
 | `LiteralTooLong` | System/public literal exceeds 8,192-byte limit |
 | `DtdParensTooDeep` | Content model / enumeration parenthesis nesting exceeds limit |
 
@@ -302,7 +351,7 @@ The XML 1.0 spec requires all conformant processors to enforce these rules. This
 
 The XML Information Set defines these as properties of information items. This parser does not deliver them:
 
-- **Namespace URI / local name** - names are reported verbatim (e.g. `ns:elem`). No prefix resolution is performed.
+- **Namespace URI** - `QName` splits element and attribute names into prefix and local name syntactically (e.g. `ns:elem` gives `ns` + `elem`), but prefixes are not resolved to namespace URIs and `xmlns` attributes get no special treatment.
 - **Entity expansion** - `&amp;` is reported as `entity_ref("amp")`, not expanded to `&`. This applies to all five predefined entities and any DTD-defined entities.
 - **Character reference decoding** - `&#60;` is reported as `char_ref("60")`, not decoded to `<`.
 - **Attribute value normalization** - raw bytes between quotes are delivered as-is. No whitespace normalization (tabs/newlines to spaces, leading/trailing stripping for tokenized types) is applied.
