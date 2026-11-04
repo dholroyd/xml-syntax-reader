@@ -164,6 +164,11 @@ impl Reader {
         };
         // Peek-ahead mini-loop: scan a short window for more tags.
         'peek: loop {
+            // Any bytes between the end of the previous markup and the next
+            // delimiter are text. Mark the run start now so that an inline
+            // tag/ref handled below flushes it via `flush_text_before()`, and
+            // so that it remains pending if we fall back to SIMD.
+            self.text_start = Some(pos);
             let limit = (pos + 16).min(buf.len());
             let mut text_scan = pos;
             while text_scan < limit {
@@ -175,7 +180,6 @@ impl Reader {
                         pos = next;
                         continue 'peek;
                     }
-                    self.text_start = Some(pos);
                     return Ok(Some((text_scan, text_scan / 64 * 64)));
                 } else if ch == b'&' {
                     if let Some(next) = self.try_inline_ref(
@@ -184,16 +188,13 @@ impl Reader {
                         pos = next;
                         continue 'peek;
                     }
-                    self.text_start = Some(pos);
                     return Ok(Some((text_scan, text_scan / 64 * 64)));
                 } else if ch == b']' {
-                    self.text_start = Some(pos);
                     return Ok(Some((text_scan, text_scan / 64 * 64)));
                 }
                 text_scan += 1;
             }
             // No delimiter in window - go back to memchr3
-            self.text_start = Some(pos);
             return Ok(Some((limit, limit / 64 * 64)));
         }
     }

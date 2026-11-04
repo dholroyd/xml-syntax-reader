@@ -868,6 +868,43 @@ fn split_long_text() {
     verify_all_splits(&doc);
 }
 
+/// Regression test for issue #2: short text following a long text run must
+/// not be dropped.
+#[test]
+fn short_text_after_long_text() {
+    let mut doc = Vec::new();
+    doc.extend_from_slice(b"<r><g>");
+    doc.extend_from_slice(&[b'x'; 200]);
+    doc.extend_from_slice(b"</g><n>3</n></r>");
+    assert_eq!(doc.len(), 222);
+
+    let events = parse_full(&doc);
+    assert!(
+        events.contains(&"Characters(3, 213..214)".to_string()),
+        "missing text content of <n>: {events:?}",
+    );
+
+    verify_all_splits(&doc);
+}
+
+/// As above, but the short text follows an entity reference handled by the
+/// same inline fast-path.
+#[test]
+fn short_text_after_long_text_and_entity_ref() {
+    let mut doc = Vec::new();
+    doc.extend_from_slice(b"<r>");
+    doc.extend_from_slice(&[b'x'; 200]);
+    doc.extend_from_slice(b"&amp;3</r>");
+
+    let events = parse_full(&doc);
+    assert!(
+        events.contains(&"Characters(3, 208..209)".to_string()),
+        "missing text after entity ref: {events:?}",
+    );
+
+    verify_all_splits(&doc);
+}
+
 #[test]
 fn split_long_attribute_value() {
     let mut doc = Vec::new();
