@@ -279,7 +279,7 @@ checksum = "16062d030850f35054e37746427b9febb74a2f24c9c6dd6fa2d0c13c5f53221e"
 
 [[package]]
 name = "xml-syntax-reader"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "gungraun",
  "memchr",
