@@ -1676,6 +1676,14 @@ impl Reader {
         self.finish_doctype_name(buf, next, end_abs, name_start, stream_offset, visitor)
     }
 
+    /// Span of the keyword in a `<!KEYWORD` markup declaration, which follows
+    /// the `<!` whose `<` is at `markup_start`.
+    #[cfg(feature = "dtd")]
+    fn dtd_keyword_span(&self, stream_offset: u64, keyword: &[u8]) -> Span {
+        let start = stream_offset + self.markup_start.unwrap() as u64 + 2;
+        Span::new(start, start + keyword.len() as u64)
+    }
+
     /// Emit doctype_start and transition to DoctypeContent or close.
     fn finish_doctype_name<V: Visitor>(
         &mut self,
@@ -1697,8 +1705,12 @@ impl Reader {
             stream_offset + name_start as u64,
             stream_offset + end_abs as u64,
         );
+        // `markup_start` is the position of `<` in `<!DOCTYPE`; the keyword
+        // follows the `<!`.
+        let keyword_start = stream_offset + self.markup_start.unwrap() as u64 + 2;
+        let keyword_span = Span::new(keyword_start, keyword_start + b"DOCTYPE".len() as u64);
         visitor
-            .doctype_start(name, name_span)
+            .doctype_start(keyword_span, name, name_span)
             .map_err(ParseError::Visitor)?;
 
         let byte = buf[end_abs];
@@ -2538,7 +2550,7 @@ impl Reader {
                             stream_offset + name_start as u64,
                             stream_offset + abs as u64,
                         );
-                        visitor.element_decl_start(name, span).map_err(ParseError::Visitor)?;
+                        visitor.element_decl_start(self.dtd_keyword_span(stream_offset, b"ELEMENT"), name, span).map_err(ParseError::Visitor)?;
                         self.dtd_phase = DtdPhase::ElementAfterName;
                         continue; // reprocess this byte
                     }
@@ -2747,7 +2759,7 @@ impl Reader {
                             stream_offset + name_start as u64,
                             stream_offset + abs as u64,
                         );
-                        visitor.entity_decl_start(name, kind, span)
+                        visitor.entity_decl_start(self.dtd_keyword_span(stream_offset, b"ENTITY"), name, kind, span)
                             .map_err(ParseError::Visitor)?;
                         self.dtd_phase = DtdPhase::EntityBeforeDef { kind };
                         continue;
@@ -3176,7 +3188,7 @@ impl Reader {
                             stream_offset + name_start as u64,
                             stream_offset + abs as u64,
                         );
-                        visitor.notation_decl_start(name, span).map_err(ParseError::Visitor)?;
+                        visitor.notation_decl_start(self.dtd_keyword_span(stream_offset, b"NOTATION"), name, span).map_err(ParseError::Visitor)?;
                         self.dtd_phase = DtdPhase::NotationBeforeDef;
                         continue;
                     }
@@ -3245,7 +3257,7 @@ impl Reader {
                             stream_offset + name_start as u64,
                             stream_offset + abs as u64,
                         );
-                        visitor.attlist_decl_start(name, span).map_err(ParseError::Visitor)?;
+                        visitor.attlist_decl_start(self.dtd_keyword_span(stream_offset, b"ATTLIST"), name, span).map_err(ParseError::Visitor)?;
                         self.dtd_phase = DtdPhase::AttlistIdle;
                         continue;
                     }
