@@ -401,9 +401,15 @@ pub trait Visitor {
     // --- DOCTYPE ---
 
     /// Start of a DOCTYPE declaration: `<!DOCTYPE name`.
-    /// `name` is the root element name.
-    fn doctype_start(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
-        let _ = (name, span);
+    /// `keyword_span` covers the `DOCTYPE` keyword (excluding the leading `<!`).
+    /// `name` is the root element name, and `name_span` its location.
+    fn doctype_start(
+        &mut self,
+        keyword_span: Span,
+        name: &[u8],
+        name_span: Span,
+    ) -> Result<(), Self::Error> {
+        let _ = (keyword_span, name, name_span);
         Ok(())
     }
 
@@ -478,9 +484,16 @@ pub trait Visitor {
 
     // --- ELEMENT declaration ---
 
-    /// Start of `<!ELEMENT name ...>`. `name` is the element name.
-    fn element_decl_start(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
-        let _ = (name, span);
+    /// Start of `<!ELEMENT name ...>`.
+    /// `keyword_span` covers the `ELEMENT` keyword (excluding the leading `<!`).
+    /// `name` is the element name, and `name_span` its location.
+    fn element_decl_start(
+        &mut self,
+        keyword_span: Span,
+        name: &[u8],
+        name_span: Span,
+    ) -> Result<(), Self::Error> {
+        let _ = (keyword_span, name, name_span);
         Ok(())
     }
 
@@ -512,9 +525,16 @@ pub trait Visitor {
 
     // --- ATTLIST declaration ---
 
-    /// Start of `<!ATTLIST name ...>`. `name` is the element name.
-    fn attlist_decl_start(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
-        let _ = (name, span);
+    /// Start of `<!ATTLIST name ...>`.
+    /// `keyword_span` covers the `ATTLIST` keyword (excluding the leading `<!`).
+    /// `name` is the element name, and `name_span` its location.
+    fn attlist_decl_start(
+        &mut self,
+        keyword_span: Span,
+        name: &[u8],
+        name_span: Span,
+    ) -> Result<(), Self::Error> {
+        let _ = (keyword_span, name, name_span);
         Ok(())
     }
 
@@ -593,13 +613,16 @@ pub trait Visitor {
     // --- ENTITY declaration ---
 
     /// Start of `<!ENTITY name ...>` or `<!ENTITY % name ...>`.
+    /// `keyword_span` covers the `ENTITY` keyword (excluding the leading `<!`).
+    /// `name` is the entity name, and `name_span` its location.
     fn entity_decl_start(
         &mut self,
+        keyword_span: Span,
         name: &[u8],
         kind: EntityKind,
-        span: Span,
+        name_span: Span,
     ) -> Result<(), Self::Error> {
-        let _ = (name, kind, span);
+        let _ = (keyword_span, name, kind, name_span);
         Ok(())
     }
 
@@ -659,9 +682,16 @@ pub trait Visitor {
 
     // --- NOTATION declaration ---
 
-    /// Start of `<!NOTATION name ...>`. `name` is the notation name.
-    fn notation_decl_start(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
-        let _ = (name, span);
+    /// Start of `<!NOTATION name ...>`.
+    /// `keyword_span` covers the `NOTATION` keyword (excluding the leading `<!`).
+    /// `name` is the notation name, and `name_span` its location.
+    fn notation_decl_start(
+        &mut self,
+        keyword_span: Span,
+        name: &[u8],
+        name_span: Span,
+    ) -> Result<(), Self::Error> {
+        let _ = (keyword_span, name, name_span);
         Ok(())
     }
 

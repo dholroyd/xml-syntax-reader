@@ -216,12 +216,19 @@ impl Visitor for Recorder {
         Ok(())
     }
 
-    fn doctype_start(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
+    fn doctype_start(
+        &mut self,
+        keyword_span: Span,
+        name: &[u8],
+        name_span: Span,
+    ) -> Result<(), Self::Error> {
         self.events.push(format!(
-            "DoctypeStart({}, {}..{})",
+            "DoctypeStart({}..{}, {}, {}..{})",
+            keyword_span.start,
+            keyword_span.end,
             String::from_utf8_lossy(name),
-            span.start,
-            span.end,
+            name_span.start,
+            name_span.end,
         ));
         Ok(())
     }
@@ -254,9 +261,10 @@ impl Visitor for Recorder {
         Ok(())
     }
 
-    fn element_decl_start(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
+    fn element_decl_start(&mut self, keyword_span: Span, name: &[u8], span: Span) -> Result<(), Self::Error> {
         self.events.push(format!(
-            "ElementDeclStart({}, {}..{})",
+            "ElementDeclStart({}..{}, {}, {}..{})",
+            keyword_span.start, keyword_span.end,
             String::from_utf8_lossy(name), span.start, span.end,
         ));
         Ok(())
@@ -285,9 +293,10 @@ impl Visitor for Recorder {
         Ok(())
     }
 
-    fn attlist_decl_start(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
+    fn attlist_decl_start(&mut self, keyword_span: Span, name: &[u8], span: Span) -> Result<(), Self::Error> {
         self.events.push(format!(
-            "AttlistDeclStart({}, {}..{})",
+            "AttlistDeclStart({}..{}, {}, {}..{})",
+            keyword_span.start, keyword_span.end,
             String::from_utf8_lossy(name), span.start, span.end,
         ));
         Ok(())
@@ -358,9 +367,10 @@ impl Visitor for Recorder {
         Ok(())
     }
 
-    fn entity_decl_start(&mut self, name: &[u8], kind: xml_syntax_reader::EntityKind, span: Span) -> Result<(), Self::Error> {
+    fn entity_decl_start(&mut self, keyword_span: Span, name: &[u8], kind: xml_syntax_reader::EntityKind, span: Span) -> Result<(), Self::Error> {
         self.events.push(format!(
-            "EntityDeclStart({}, pe={}, {}..{})",
+            "EntityDeclStart({}..{}, {}, pe={}, {}..{})",
+            keyword_span.start, keyword_span.end,
             String::from_utf8_lossy(name), kind == xml_syntax_reader::EntityKind::Parameter, span.start, span.end,
         ));
         Ok(())
@@ -432,9 +442,10 @@ impl Visitor for Recorder {
         Ok(())
     }
 
-    fn notation_decl_start(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
+    fn notation_decl_start(&mut self, keyword_span: Span, name: &[u8], span: Span) -> Result<(), Self::Error> {
         self.events.push(format!(
-            "NotationDeclStart({}, {}..{})",
+            "NotationDeclStart({}..{}, {}, {}..{})",
+            keyword_span.start, keyword_span.end,
             String::from_utf8_lossy(name), span.start, span.end,
         ));
         Ok(())
@@ -1307,7 +1318,7 @@ fn simple_doctype() {
     assert_eq!(
         events,
         vec![
-            "DoctypeStart(html, 10..14)",
+            "DoctypeStart(2..9, html, 10..14)",
             "DoctypeEnd(14..15)",
         ]
     );
@@ -1318,7 +1329,7 @@ fn simple_doctype() {
 fn doctype_with_internal_subset() {
     let events = parse_full(b"<!DOCTYPE html [<!ENTITY foo \"bar\">]>");
     assert_eq!(events.len(), 3);
-    assert_eq!(events[0], "DoctypeStart(html, 10..14)");
+    assert_eq!(events[0], "DoctypeStart(2..9, html, 10..14)");
     assert!(events[1].starts_with("DoctypeContent("));
     assert!(events[2].starts_with("DoctypeEnd("));
 }
@@ -1333,7 +1344,7 @@ fn doctype_internal_subset_no_space() {
     assert_eq!(
         events,
         vec![
-            "DoctypeStart(html, 10..14)",
+            "DoctypeStart(2..9, html, 10..14)",
             "DoctypeContent([<!ENTITY foo \"bar\">], 14..35)",
             "DoctypeEnd(35..36)",
         ]
@@ -1344,6 +1355,17 @@ fn doctype_internal_subset_no_space() {
 #[cfg(not(feature = "dtd"))]
 fn split_doctype_internal_subset_no_space() {
     verify_all_splits(b"<!DOCTYPE html[<!ENTITY foo \"bar\">]>");
+}
+
+#[test]
+fn doctype_keyword_span_not_at_start() {
+    // 0         1         2
+    // 0123456789012345678901234567
+    // <!-- x -->\n<!DOCTYPE  r >
+    let doc = b"<!-- x -->\n<!DOCTYPE  r >";
+    let events = parse_full(doc);
+    assert!(events.contains(&"DoctypeStart(13..20, r, 22..23)".to_string()), "{events:?}");
+    verify_all_splits(doc);
 }
 
 #[test]
@@ -1362,7 +1384,7 @@ fn split_doctype_with_internal_subset() {
 fn doctype_comment_with_bracket() {
     // ] inside a comment must not decrement bracket depth
     let events = parse_full(b"<!DOCTYPE html [<!-- ] -->]><r/>");
-    assert_eq!(events[0], "DoctypeStart(html, 10..14)");
+    assert_eq!(events[0], "DoctypeStart(2..9, html, 10..14)");
     assert!(events[1].starts_with("DoctypeContent("));
     assert!(events[2].starts_with("DoctypeEnd("));
     assert_eq!(events[3], "StartTagOpen(r, 29..30)");
@@ -1373,7 +1395,7 @@ fn doctype_comment_with_bracket() {
 fn doctype_comment_with_gt() {
     // > inside a comment must not close the DOCTYPE
     let events = parse_full(b"<!DOCTYPE html [<!-- > -->]><r/>");
-    assert_eq!(events[0], "DoctypeStart(html, 10..14)");
+    assert_eq!(events[0], "DoctypeStart(2..9, html, 10..14)");
     assert!(events[2].starts_with("DoctypeEnd("));
     assert_eq!(events[3], "StartTagOpen(r, 29..30)");
 }
@@ -1383,7 +1405,7 @@ fn doctype_comment_with_gt() {
 fn doctype_quoted_bracket() {
     // ] inside a quoted string must not decrement bracket depth
     let events = parse_full(b"<!DOCTYPE html [<!ENTITY foo \"]bar\">]><r/>");
-    assert_eq!(events[0], "DoctypeStart(html, 10..14)");
+    assert_eq!(events[0], "DoctypeStart(2..9, html, 10..14)");
     assert!(events[2].starts_with("DoctypeEnd("));
     assert_eq!(events[3], "StartTagOpen(r, 39..40)");
 }
@@ -1393,7 +1415,7 @@ fn doctype_quoted_bracket() {
 fn doctype_single_quoted_bracket() {
     // ] inside a single-quoted string must not decrement bracket depth
     let events = parse_full(b"<!DOCTYPE html [<!ENTITY foo ']bar'>]><r/>");
-    assert_eq!(events[0], "DoctypeStart(html, 10..14)");
+    assert_eq!(events[0], "DoctypeStart(2..9, html, 10..14)");
     assert!(events[2].starts_with("DoctypeEnd("));
     assert_eq!(events[3], "StartTagOpen(r, 39..40)");
 }
@@ -1403,7 +1425,7 @@ fn doctype_single_quoted_bracket() {
 fn doctype_pi_with_bracket() {
     // ] inside a PI must not decrement bracket depth
     let events = parse_full(b"<!DOCTYPE html [<?pi ]?>]><r/>");
-    assert_eq!(events[0], "DoctypeStart(html, 10..14)");
+    assert_eq!(events[0], "DoctypeStart(2..9, html, 10..14)");
     assert!(events[2].starts_with("DoctypeEnd("));
     assert_eq!(events[3], "StartTagOpen(r, 27..28)");
 }
@@ -1412,7 +1434,7 @@ fn doctype_pi_with_bracket() {
 fn doctype_quoted_gt_no_subset() {
     // > inside a quoted string in external ID must not close DOCTYPE
     let events = parse_full(b"<!DOCTYPE html SYSTEM \"foo>.dtd\"><r/>");
-    assert_eq!(events[0], "DoctypeStart(html, 10..14)");
+    assert_eq!(events[0], "DoctypeStart(2..9, html, 10..14)");
     assert!(events[1].starts_with("DoctypeContent("));
     assert!(events[2].starts_with("DoctypeEnd("));
     assert_eq!(events[3], "StartTagOpen(r, 34..35)");
@@ -2110,7 +2132,7 @@ fn error_doctype_only_whitespace() {
 #[test]
 fn valid_doctype() {
     let events = parse_full(b"<!DOCTYPE html><html/>");
-    assert!(events.iter().any(|e| e.starts_with("DoctypeStart(html,")));
+    assert!(events.iter().any(|e| e.starts_with("DoctypeStart(2..9, html,")));
 }
 
 #[test]
@@ -2526,9 +2548,9 @@ mod dtd_tests {
     #[test]
     fn dtd_entity_simple_value() {
         let events = parse_full(b"<!DOCTYPE r [<!ENTITY foo \"bar\">]><r/>");
-        assert_eq!(events[0], "DoctypeStart(r, 10..11)");
+        assert_eq!(events[0], "DoctypeStart(2..9, r, 10..11)");
         assert_eq!(events[1], "SubsetStart(12..13)");
-        assert_eq!(events[2], "EntityDeclStart(foo, pe=false, 22..25)");
+        assert_eq!(events[2], "EntityDeclStart(15..21, foo, pe=false, 22..25)");
         assert_eq!(events[3], "EntityDeclValue(bar, 27..30)");
         assert_eq!(events[4], "EntityDeclValueEnd(30..31)");
         assert_eq!(events[5], "EntityDeclEnd(31..32)");
@@ -2540,9 +2562,9 @@ mod dtd_tests {
     fn dtd_internal_subset_no_space() {
         // `[` immediately after the name must open the internal subset (issue #1)
         let events = parse_full(b"<!DOCTYPE r[<!ENTITY foo \"bar\">]><r/>");
-        assert_eq!(events[0], "DoctypeStart(r, 10..11)");
+        assert_eq!(events[0], "DoctypeStart(2..9, r, 10..11)");
         assert_eq!(events[1], "SubsetStart(11..12)");
-        assert_eq!(events[2], "EntityDeclStart(foo, pe=false, 21..24)");
+        assert_eq!(events[2], "EntityDeclStart(14..20, foo, pe=false, 21..24)");
         assert_eq!(events[3], "EntityDeclValue(bar, 26..29)");
         assert_eq!(events[4], "EntityDeclValueEnd(29..30)");
         assert_eq!(events[5], "EntityDeclEnd(30..31)");
@@ -2563,7 +2585,7 @@ mod dtd_tests {
     #[test]
     fn dtd_entity_with_entity_ref() {
         let events = parse_full(b"<!DOCTYPE r [<!ENTITY foo \"a&amp;b\">]><r/>");
-        assert_eq!(events[2], "EntityDeclStart(foo, pe=false, 22..25)");
+        assert_eq!(events[2], "EntityDeclStart(15..21, foo, pe=false, 22..25)");
         assert_eq!(events[3], "EntityDeclValue(a, 27..28)");
         assert_eq!(events[4], "EntityDeclEntityRef(amp, 28..33)");
         assert_eq!(events[5], "EntityDeclValue(b, 33..34)");
@@ -2581,7 +2603,7 @@ mod dtd_tests {
         // <!DOCTYPE r [<!ENTITY foo "&#60;">]><r/>
         // char ref &#60; spans bytes 27..32 (from & to ;)
         let events = parse_full(b"<!DOCTYPE r [<!ENTITY foo \"&#60;\">]><r/>");
-        assert_eq!(events[2], "EntityDeclStart(foo, pe=false, 22..25)");
+        assert_eq!(events[2], "EntityDeclStart(15..21, foo, pe=false, 22..25)");
         assert_eq!(events[3], "EntityDeclCharRef(60, 27..32)");
         assert_eq!(events[4], "EntityDeclValueEnd(32..33)");
         assert_eq!(events[5], "EntityDeclEnd(33..34)");
@@ -2597,7 +2619,7 @@ mod dtd_tests {
         // <!DOCTYPE r [<!ENTITY foo "%bar;">]><r/>
         // PE ref %bar; spans bytes 27..32 (from % to ;)
         let events = parse_full(b"<!DOCTYPE r [<!ENTITY foo \"%bar;\">]><r/>");
-        assert_eq!(events[2], "EntityDeclStart(foo, pe=false, 22..25)");
+        assert_eq!(events[2], "EntityDeclStart(15..21, foo, pe=false, 22..25)");
         assert_eq!(events[3], "EntityDeclPeRef(bar, 27..32)");
         assert_eq!(events[4], "EntityDeclValueEnd(32..33)");
     }
@@ -2610,7 +2632,7 @@ mod dtd_tests {
     #[test]
     fn dtd_parameter_entity() {
         let events = parse_full(b"<!DOCTYPE r [<!ENTITY % dtd SYSTEM \"common.dtd\">]><r/>");
-        assert_eq!(events[2], "EntityDeclStart(dtd, pe=true, 24..27)");
+        assert_eq!(events[2], "EntityDeclStart(15..21, dtd, pe=true, 24..27)");
         assert_eq!(events[3], "EntityDeclSystemId(common.dtd, 36..46)");
         assert_eq!(events[4], "EntityDeclEnd(47..48)");
     }
@@ -2623,7 +2645,7 @@ mod dtd_tests {
     #[test]
     fn dtd_entity_public() {
         let events = parse_full(b"<!DOCTYPE r [<!ENTITY logo PUBLIC \"-//Ex//Logo\" \"logo.gif\" NDATA gif>]><r/>");
-        assert_eq!(events[2], "EntityDeclStart(logo, pe=false, 22..26)");
+        assert_eq!(events[2], "EntityDeclStart(15..21, logo, pe=false, 22..26)");
         assert_eq!(events[3], "EntityDeclPublicId(-//Ex//Logo, 35..46)");
         assert_eq!(events[4], "EntityDeclSystemId(logo.gif, 49..57)");
         assert_eq!(events[5], "EntityDeclNdata(gif, 65..68)");
@@ -2652,7 +2674,7 @@ mod dtd_tests {
     #[test]
     fn dtd_element_empty() {
         let events = parse_full(b"<!DOCTYPE r [<!ELEMENT br EMPTY>]><r/>");
-        assert_eq!(events[2], "ElementDeclStart(br, 23..25)");
+        assert_eq!(events[2], "ElementDeclStart(15..22, br, 23..25)");
         assert_eq!(events[3], "ElementDeclEmpty(26..31)");
         assert_eq!(events[4], "ElementDeclEnd(31..32)");
     }
@@ -2665,7 +2687,7 @@ mod dtd_tests {
     #[test]
     fn dtd_element_any() {
         let events = parse_full(b"<!DOCTYPE r [<!ELEMENT div ANY>]><r/>");
-        assert_eq!(events[2], "ElementDeclStart(div, 23..26)");
+        assert_eq!(events[2], "ElementDeclStart(15..22, div, 23..26)");
         assert_eq!(events[3], "ElementDeclAny(27..30)");
         assert_eq!(events[4], "ElementDeclEnd(30..31)");
     }
@@ -2678,7 +2700,7 @@ mod dtd_tests {
     #[test]
     fn dtd_element_content_model() {
         let events = parse_full(b"<!DOCTYPE r [<!ELEMENT p (#PCDATA|em)*>]><r/>");
-        assert_eq!(events[2], "ElementDeclStart(p, 23..24)");
+        assert_eq!(events[2], "ElementDeclStart(15..22, p, 23..24)");
         assert_eq!(events[3], "ElementDeclContentSpec((#PCDATA|em)*, 25..38)");
         assert_eq!(events[4], "ElementDeclEnd(38..39)");
     }
@@ -2693,7 +2715,7 @@ mod dtd_tests {
     #[test]
     fn dtd_notation_system() {
         let events = parse_full(b"<!DOCTYPE r [<!NOTATION gif SYSTEM \"image/gif\">]><r/>");
-        assert_eq!(events[2], "NotationDeclStart(gif, 24..27)");
+        assert_eq!(events[2], "NotationDeclStart(15..23, gif, 24..27)");
         assert_eq!(events[3], "NotationDeclSystemId(image/gif, 36..45)");
         assert_eq!(events[4], "NotationDeclEnd(46..47)");
     }
@@ -2706,7 +2728,7 @@ mod dtd_tests {
     #[test]
     fn dtd_notation_public() {
         let events = parse_full(b"<!DOCTYPE r [<!NOTATION gif PUBLIC \"-//Ex//Gif\" \"image/gif\">]><r/>");
-        assert_eq!(events[2], "NotationDeclStart(gif, 24..27)");
+        assert_eq!(events[2], "NotationDeclStart(15..23, gif, 24..27)");
         assert_eq!(events[3], "NotationDeclPublicId(-//Ex//Gif, 36..46)");
         assert_eq!(events[4], "NotationDeclSystemId(image/gif, 49..58)");
         assert_eq!(events[5], "NotationDeclEnd(59..60)");
@@ -2722,7 +2744,7 @@ mod dtd_tests {
     #[test]
     fn dtd_attlist_required() {
         let events = parse_full(b"<!DOCTYPE r [<!ATTLIST img src CDATA #REQUIRED>]><r/>");
-        assert_eq!(events[2], "AttlistDeclStart(img, 23..26)");
+        assert_eq!(events[2], "AttlistDeclStart(15..22, img, 23..26)");
         assert_eq!(events[3], "AttlistAttrName(src, 27..30)");
         assert_eq!(events[4], "AttlistAttrType(CDATA, 31..36)");
         assert_eq!(events[5], "AttlistAttrRequired(37..46)");
@@ -2861,7 +2883,7 @@ mod dtd_tests {
     fn dtd_comment_with_bracket_in_subset() {
         // ] inside a comment must not end the internal subset
         let events = parse_full(b"<!DOCTYPE r [<!-- ] -->]><r/>");
-        assert_eq!(events[0], "DoctypeStart(r, 10..11)");
+        assert_eq!(events[0], "DoctypeStart(2..9, r, 10..11)");
         assert_eq!(events[2], "CommentStart(13..17)");
         assert!(events.iter().any(|e| e.starts_with("SubsetEnd(")));
         assert!(events.iter().any(|e| e.starts_with("DoctypeEnd(")));
@@ -2891,7 +2913,7 @@ mod dtd_tests {
     fn dtd_entity_value_with_bracket() {
         // ] inside an entity value must not end the internal subset
         let events = parse_full(b"<!DOCTYPE r [<!ENTITY foo \"]bar\">]><r/>");
-        assert!(events.iter().any(|e| e.starts_with("EntityDeclStart(foo,")));
+        assert!(events.iter().any(|e| e.starts_with("EntityDeclStart(") && e.contains(", foo,")));
         assert!(events.iter().any(|e| e.starts_with("SubsetEnd(")));
         assert!(events.iter().any(|e| e.starts_with("StartTagOpen(r,")));
     }
@@ -2904,7 +2926,7 @@ mod dtd_tests {
     #[test]
     fn dtd_entity_single_quoted_value_with_bracket() {
         let events = parse_full(b"<!DOCTYPE r [<!ENTITY foo ']bar'>]><r/>");
-        assert!(events.iter().any(|e| e.starts_with("EntityDeclStart(foo,")));
+        assert!(events.iter().any(|e| e.starts_with("EntityDeclStart(") && e.contains(", foo,")));
         assert!(events.iter().any(|e| e.starts_with("SubsetEnd(")));
         assert!(events.iter().any(|e| e.starts_with("StartTagOpen(r,")));
     }
@@ -2927,6 +2949,11 @@ mod dtd_tests {
         verify_all_splits(b"<!DOCTYPE r [<?pi ]?>]><r/>");
     }
 
+    #[test]
+    fn split_dtd_decl_keywords() {
+        verify_all_splits(b"<!DOCTYPE r [<!ELEMENT p ANY><!ATTLIST p a CDATA #IMPLIED><!NOTATION gif SYSTEM \"g\">]><r/>");
+    }
+
     // ── Multiple declarations ───────────────────────────────────────────
 
     #[test]
@@ -2938,9 +2965,9 @@ mod dtd_tests {
               <!NOTATION gif SYSTEM \"image/gif\">\n\
               ]><r/>"
         );
-        assert!(events.iter().any(|e| e.starts_with("ElementDeclStart(p,")));
-        assert!(events.iter().any(|e| e.starts_with("EntityDeclStart(foo,")));
-        assert!(events.iter().any(|e| e.starts_with("NotationDeclStart(gif,")));
+        assert!(events.iter().any(|e| e.starts_with("ElementDeclStart(") && e.contains(", p,")));
+        assert!(events.iter().any(|e| e.starts_with("EntityDeclStart(") && e.contains(", foo,")));
+        assert!(events.iter().any(|e| e.starts_with("NotationDeclStart(") && e.contains(", gif,")));
         assert!(events.iter().any(|e| e.starts_with("SubsetEnd(")));
     }
 
@@ -3011,7 +3038,7 @@ mod dtd_tests {
     #[test]
     fn dtd_empty_subset() {
         let events = parse_full(b"<!DOCTYPE r []><r/>");
-        assert_eq!(events[0], "DoctypeStart(r, 10..11)");
+        assert_eq!(events[0], "DoctypeStart(2..9, r, 10..11)");
         assert_eq!(events[1], "SubsetStart(12..13)");
         assert_eq!(events[2], "SubsetEnd(13..14)");
         assert_eq!(events[3], "DoctypeEnd(14..15)");
@@ -3025,7 +3052,7 @@ mod dtd_tests {
     #[test]
     fn dtd_subset_with_whitespace_only() {
         let events = parse_full(b"<!DOCTYPE r [ \n\t ]><r/>");
-        assert_eq!(events[0], "DoctypeStart(r, 10..11)");
+        assert_eq!(events[0], "DoctypeStart(2..9, r, 10..11)");
         assert_eq!(events[1], "SubsetStart(12..13)");
         assert_eq!(events[2], "SubsetEnd(17..18)");
         assert_eq!(events[3], "DoctypeEnd(18..19)");
