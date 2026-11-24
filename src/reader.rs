@@ -1255,13 +1255,19 @@ impl Reader {
             self.text_start = Some(block_offset + pos);
         }
 
+	// Bracket (']') look-ahead is bounded to the current simd block,
+	// carrying the count (capped at 2) into the next block. Scanning
+	// further would rescan a long run of `]` once per block and be
+	// accidentally quadratic.
+        let block_end = block_offset + block_len;
+
         // Handle carry-over bracket count from previous block/buffer.
         if self.content_bracket_count > 0 {
             let abs = block_offset + pos;
-            if abs < buf.len() {
+            if abs < block_end {
                 let mut scan = abs;
                 let mut brackets = self.content_bracket_count;
-                while scan < buf.len() {
+                while scan < block_end {
                     let ch = buf[scan];
                     if ch == b']' {
                         brackets = brackets.saturating_add(1);
@@ -1276,7 +1282,7 @@ impl Reader {
                         break;
                     }
                 }
-                if scan >= buf.len() {
+                if scan >= block_end {
                     self.content_bracket_count = brackets.min(2);
                 }
                 let consumed_in_block = scan - block_offset;
@@ -1382,7 +1388,7 @@ impl Reader {
                     // We need to look ahead for more ']' and a final '>'.
                     let mut scan = abs + 1;
                     let mut brackets: u8 = self.content_bracket_count + 1;
-                    while scan < buf.len() {
+                    while scan < block_end {
                         let ch = buf[scan];
                         if ch == b']' {
                             brackets = brackets.saturating_add(1);
@@ -1398,8 +1404,8 @@ impl Reader {
                             break;
                         }
                     }
-                    if scan >= buf.len() {
-                        // Brackets at end of available data - remember count
+                    if scan >= block_end {
+                        // Brackets at end of block - remember count
                         self.content_bracket_count = brackets.min(2);
                     }
                     // Advance past all the bytes we just examined
