@@ -2273,6 +2273,29 @@ fn utf8_complete_multibyte_at_end_no_rewind() {
 }
 
 #[test]
+fn utf8_complete_4byte_at_end_no_rewind() {
+    // Complete 4-byte sequence at end of chunk: its last 3 bytes are all
+    // continuation bytes, which must not be mistaken for invalid UTF-8.
+    let chunk1 = "<r>abc\u{1F600}".as_bytes();
+    let chunk2 = b"</r>";
+    let (events1, _events2) = parse_two_chunks(chunk1, chunk2);
+
+    assert!(
+        events1.iter().any(|e| e.contains("abc\u{1F600}")),
+        "chunk1 events: {events1:?}"
+    );
+}
+
+/// Multibyte characters of every length, in every kind of content, must parse
+/// identically however the input is split into chunks.
+#[test]
+fn split_multibyte_utf8_all_contexts() {
+    verify_all_splits(
+        "<r a='é中😀'>é中😀<!--é中😀--><![CDATA[é中😀]]><?p é中😀?>😀</r>".as_bytes(),
+    );
+}
+
+#[test]
 fn utf8_all_ascii_no_rewind() {
     // All-ASCII content - no rewind
     let chunk1 = b"<r>hello";

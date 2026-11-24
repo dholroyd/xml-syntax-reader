@@ -4041,6 +4041,11 @@ fn utf8_boundary_rewind(buf: &[u8]) -> Result<usize, usize> {
             }
         }
     }
+    // The last 3 bytes are all continuation bytes, which is valid only as the
+    // tail of a complete 4-byte sequence whose leader immediately precedes them.
+    if buf.len() >= 4 && buf[buf.len() - 4] >= 0xF0 {
+        return Ok(0);
+    }
     Err(buf.len().saturating_sub(3)) // No leader found - invalid
 }
 
