@@ -37,3 +37,39 @@ jobs:
       - run: cargo test --locked --all-features
       - run: cargo test --locked --all-features --release
 
+  # Check the unsafe SIMD code in src/bitstream under Miri. Only the lib tests
+  # are run: the parser modules forbid unsafe code, and the integration tests
+  # are far too slow under Miri.
+  #
+  # Under Miri, is_x86_feature_detected!() reports only the target features
+  # enabled at compile time, so the AVX2 backend needs its own run with
+  # +avx2. NEON is checked by interpreting the aarch64 target on x86_64.
+  miri:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: sse2
+            target: x86_64-unknown-linux-gnu
+            rustflags: ""
+          - name: avx2
+            target: x86_64-unknown-linux-gnu
+            rustflags: "-C target-feature=+avx2"
+          - name: neon
+            target: aarch64-unknown-linux-gnu
+            rustflags: ""
+
+    runs-on: ubuntu-24.04
+    name: miri (${{ matrix.name }})
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1.15.3
+        with:
+          toolchain: nightly
+          components: miri, rust-src
+
+      - run: cargo miri test --locked --all-features --lib --target ${{ matrix.target }}
+        env:
+          RUSTFLAGS: "-D warnings ${{ matrix.rustflags }}"
+
